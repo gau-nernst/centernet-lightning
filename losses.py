@@ -1,3 +1,4 @@
+from typing import Iterable, Tuple
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -35,22 +36,58 @@ class FocalLossWithLogits(nn.Module):
 
         return loss
 
-def gather_feature(feature: torch.Tensor, index: torch.Tensor, mask=None):
-    # (N, C, H, W) to (N, HxW, C)
-    batch_dim, channel_dim = feature.shape[:2]
-    feature = feature.view(batch_dim, channel_dim, -1).permute((0,2,1)).contiguous()
-
-    dim = feature.shape[-1]
-    index = index.unsqueeze(len(index.shape)).expand(*index.shape, dim)
-    feature = feature.gather(dim=1, index=index)
-    if mask is not None:
-        mask = mask.unsqueeze(2).expand_as(feature)
-        feature = feature[mask]
-        feature = feature.reshape(-1, dim)
-    return feature
-
-def reg_l1_loss(input, mask, index, target):
+def render_gaussian_kernel(
+    heatmap: torch.Tensor,
+    center_x: float,
+    center_y: float,
+    box_w: float,
+    box_h: float,
+    alpha: float=0.54
+    ):
+    """Reference implementation https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L241
     """
-    mask: detection point
+
+    h, w = heatmap.shape
+    dtype = heatmap.dtype
+    device = heatmap.device
+
+    # TTFNet
+    std_w = alpha*box_w/6
+    std_h = alpha*box_h/6
+    var_w = std_w*std_w
+    var_h = std_h*std_h
+
+    # a matrix of (x,y)
+    grid_y, grid_x = torch.meshgrid([
+        torch.arange(h, dtype=dtype, device=device),
+        torch.arange(w, dtype=dtype, device=device)]
+    )
+
+    radius_sq = (center_x - grid_x)**2/(2*var_w) + (center_y - grid_y)**2/(2*var_h)
+    gaussian_kernel = torch.exp(-radius_sq)
+    gaussian_kernel[center_y, center_x] = 1     # force the center to be 1
+    heatmap = torch.maximum(heatmap, gaussian_kernel)
+    return heatmap
+
+def reference_focal_loss(pred, gt):
+    """ Reference implementation from CenterNet-better-plus https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet.py#L56
     """
-    raise NotImplementedError()
+    pos_inds = gt.eq(1).float()
+    neg_inds = gt.lt(1).float()
+
+    neg_weights = torch.pow(1 - gt, 4)
+    # clamp min value is set to 1e-12 to maintain the numerical stability
+    pred = torch.clamp(pred, 1e-12)
+
+    pos_loss = torch.log(pred) * torch.pow(1 - pred, 2) * pos_inds
+    neg_loss = torch.log(1 - pred) * torch.pow(pred, 2) * neg_weights * neg_inds
+
+    num_pos = pos_inds.float().sum()
+    pos_loss = pos_loss.sum()
+    neg_loss = neg_loss.sum()
+
+    if num_pos == 0:
+        loss = -neg_loss
+    else:
+        loss = -(pos_loss + neg_loss) / num_pos
+    return loss

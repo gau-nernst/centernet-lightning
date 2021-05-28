@@ -8,13 +8,12 @@ import pytorch_lightning as pl
 
 import math
 
-from losses import FocalLossWithLogits, reg_l1_loss
+from losses import FocalLossWithLogits, render_gaussian_kernel
 
 # TODO: implement loss functions
-# focal loss: https://pytorch.org/vision/stable/ops.html#torchvision.ops.sigmoid_focal_loss
 # TODO: implement output decoder
 # TODO: render ground-truth outputs from images
-# TODO: use DLA backbone from timm
+# TODO: use DLA backbone from timm (is there upsample stage from timm?)
 
 _resnet_mapper = {
     "resnet18": torchvision.models.resnet.resnet18,
@@ -23,31 +22,10 @@ _resnet_mapper = {
     "resnet101": torchvision.models.resnet.resnet101
 }
 
-class ResNetFeatureExtractor(nn.Module):
-    """ResNet from torchvision, without output head
-    """
-    def __init__(self, model: str="resnet50", pretrained: bool=True):
-        assert model in _resnet_mapper
-
-        super(ResNetFeatureExtractor, self).__init__()
-        backbone = _resnet_mapper[model](pretrained=pretrained)
-        self.stage0 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
-        self.stage1 = backbone.layer1
-        self.stage2 = backbone.layer2
-        self.stage3 = backbone.layer3
-        self.stage4 = backbone.layer4
-
-    def forward(self, x):
-        out = self.stage0(x)
-        out = self.stage1(out)
-        out = self.stage2(out)
-        out = self.stage3(out)
-        out = self.stage4(out)
-
-        return out
-
 class UpsampleBlock(nn.Module):
     """Upsample block (convolution transpose) with optional DCN
+
+    Architecture: conv + conv transpose, with BN and relu
     """
     # architecture choices
     # conv + deconv (centernet)
@@ -84,12 +62,12 @@ class UpsampleBlock(nn.Module):
 
     def forward(self, x):
         out = self.conv(x)
-        out = self.bn_conv(x)
-        out = self.relu(x)
+        out = self.bn_conv(out)
+        out = self.relu(out)
 
-        out = self.deconv(x)
-        out = self.bn_deconv(x)
-        out = self.relu(x)
+        out = self.deconv(out)
+        out = self.bn_deconv(out)
+        out = self.relu(out)
 
         return out
 
@@ -112,32 +90,39 @@ class ResNetBackbone(nn.Module):
 
     Original PoseNet https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
     """
-    def __init__(self):
+    def __init__(self, model: str="resnet50", pretrained: bool=True):
         super(ResNetBackbone, self).__init__()
-        self.backbone = ResNetFeatureExtractor()
+        # downsampling path from resnet
+        backbone = _resnet_mapper[model](pretrained=pretrained)
+        self.downsample = nn.Sequential(
+            nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4
+        )
         
-        resnet_output = 64
-        # these are from CenterNet paper
-        up_channels = [256, 128, 64]    # original PoseNet uses [256,256,256]
-        up_kernels = [4, 4, 4]
+        resnet_out_channels = 2048
+        up_channels = [256, 128, 64]    # from CenterNet paper. original PoseNet uses [256,256,256]
+        up_kernels = [4, 4, 4]          # from PoseNet paper
         self.upsample = self._make_upsample_stage(
-            in_channels=resnet_output, 
+            in_channels=resnet_out_channels, 
             up_channels=up_channels, 
             up_kernels=up_kernels)
         self.out_channels = up_channels[-1]
 
     def forward(self, x):
-        features = self.backbone(x)
-        features = self.upsample(features)
+        out = self.downsample(x)
+        out = self.upsample(out)
 
-        return features
+        return out
 
     def _make_upsample_stage(
         self,
         in_channels: int, 
-        up_channels: List(int),
-        up_kernels: List(int)) -> nn.Sequential:
-        
+        up_channels: List[int],
+        up_kernels: List[int]
+        ):
         layers = []
         layers.append(UpsampleBlock(
             in_channels, up_channels[0], deconv_kernel=up_kernels[0]
@@ -151,19 +136,19 @@ class ResNetBackbone(nn.Module):
         return nn.Sequential(*layers)
 
 class OutputHead(nn.Module):
-    """ Output head for CenterNet. Follow this implementation https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py
+    """ Output head for CenterNet. Reference implementation https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py
     """
     def __init__(
         self, in_channels: int, out_channels: int, 
-        bias_value: float=0
+        fill_bias: bool=False, bias_value: float=0
         ):
-
         super(OutputHead, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(out_channels, out_channels, 1)
 
-        self.conv2.bias.data.fill_(bias_value)
+        if fill_bias:
+            self.conv2.bias.data.fill_(bias_value)
         
     def forward(self, x):
         out = self.conv1(x)
@@ -172,14 +157,15 @@ class OutputHead(nn.Module):
 
         return out
 
-
 class CenterNet(pl.LightningModule):
+    supported_heads = ["size", "offset"]
+
     def __init__(
         self, 
         backbone: nn.Module, 
         num_classes: int, 
-        heads: Iterable(str)=None, 
-        loss_weights: Iterable(float)=None,
+        other_heads: Iterable[str]=None, 
+        loss_weights: Iterable[float]=None,
         heatmap_bias: float=-2.7,
         batch_size: int=4, 
         lr: float=1e-3
@@ -188,53 +174,109 @@ class CenterNet(pl.LightningModule):
         self.backbone = backbone
         feature_channels = backbone.out_channels
 
+        # other_heads excludes the compulsory heatmap head
         # loss weights are used to calculated total weighted loss
         # must match the number of output heads
-        if heads == None:
-            heads = ["size", "offset"]
+        if other_heads == None:
+            other_heads = ["size", "offset"]
+        assert "heatmap" not in other_heads
+        self.other_heads = other_heads
+
         if loss_weights == None:
             loss_weights = [0.1, 1]     # default values for centernet
-        assert len(heads) == len(loss_weights)
+        assert len(other_heads) == len(loss_weights)
 
         # for heatmap output, fill a pre-defined bias value
-        # for other outputs, fill bias with 0 (default)
+        # for other outputs, fill bias with 0 to match identity mapping (from centernet)
         self.output_heads = nn.ModuleDict()
-        self.output_heads["heatmap"] = OutputHead(feature_channels, num_classes, bias_value=heatmap_bias)
-        for h in heads:
-            self.heads[h] = OutputHead(feature_channels, 2)
+        self.output_heads["heatmap"] = OutputHead(
+            feature_channels, num_classes, 
+            fill_bias=True, bias_value=heatmap_bias)
         
-        self.heads = heads
+        for h in other_heads:
+            assert h in self.supported_heads
+            self.output_heads[h] = OutputHead(
+                feature_channels, 2, 
+                fill_bias=True, bias_value=0)
+        
         self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)
 
         # for pytorch lightning
         self.batch_size = batch_size
         self.learning_rate = lr
 
-    def forward(self, x: torch.Tensor):
-        features = self.backbone(x)
+    def forward(self, **kwargs):
+        # print("Hello", x)
+        # print(x.shape)
+        features = self.backbone(kwargs["image"])
         output = {}
-        for k,v in self.output_heads:
-            output[k] = v[features]
+        for k,v in self.output_heads.items():
+            # k is head name, v is that head nn.Module
+            output[k] = v(features)
         
         return output
 
-    # lightning module, define loss here
-    def training_step(self, batch: Dict(torch.Tensor), batch_idx):
-        x, y = batch
-        output = self(x)
+    def compute_loss(self, batch):
+        img = batch["image"]
+        output = self(img)
+        output_h, output_w = output["heatmap"].shape[-2:]
 
-        losses = {}
-        losses["heatmap"] = self.focal_loss(output["heatmap"], y["heatmap"])
-        
-        mask = None
-        index = None
-        for h in self.heads:
-            losses[h] = reg_l1_loss(output[h], mask, index, y[h])
-        
-        self.log('train_loss', losses)
+        losses = {
+            "heatmap": torch.Tensor(0., dtype=torch.float32, device=self.device)
+        }
+        for h in self.other_heads:
+            losses[h] = torch.Tensor(0., dtype=torch.float32, device=self.device)
+
+        target_heatmap = torch.zeros_like(output["heatmap"])
+
+        # convert relative size to absolute size 
+        batch["bboxes"][:,[0,2]] *= output_w
+        batch["bboxes"][:,[1,3]] *= output_h
+
+        # render target heatmap, size and offset maps
+        for bbox, label, mask in zip(batch["bboxes"], batch["labels"], batch["mask"]):
+            center_x, center_y, box_w, box_h = bbox
+
+            # convert to integers for getting coordinates
+            center_x_int = int(center_x)
+            center_y_int = int(center_y)
+
+            if "size" in output:
+                losses["size"] += F.smooth_l1_loss(output["size"][0,center_y_int,center_x_int], box_w, reduction="sum")*mask
+                losses["size"] += F.smooth_l1_loss(output["size"][1,center_y_int,center_x_int], box_h, reduction="sum")*mask
+            if "offset" in output:
+                losses["offset"] += F.smooth_l1_loss(output["offset"][0,center_y_int,center_x_int], center_x-center_x_int)*mask
+                losses["offset"] += F.smooth_l1_loss(output["offset"][0,center_y_int,center_x_int], center_y-center_y_int)*mask
+            if "displacement" in output:
+                pass
+
+            # render object center to target heatmap
+            target_heatmap[label] = render_gaussian_kernel(target_heatmap[label], center_x_int, center_y_int, box_w, box_h)
+
+        losses["heatmap"] = self.focal_loss(output["heatmap"], target_heatmap)
+
         return losses
 
-    # get optimizer
+    # lightning method, return loss here
+    def training_step(self, batch, batch_idx):
+        losses = self.compute_loss(batch)
+        
+        total_loss = losses["heatmap"]
+        for h in self.other_heads:
+            total_loss += losses[h]
+
+        self.log('train_loss', losses)
+        return total_loss
+
+    def validation_step(self, batch, batch_idx):
+        losses = self.compute_loss(batch)
+        # calculate loss and evaluation metrics
+
+    def test_step(self, batch, batch_idx):
+        losses = self.compute_loss(batch)
+        # same as validation
+
+    # lightning method
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
