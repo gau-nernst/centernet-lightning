@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 
 import math
 
-from losses import FocalLossWithLogits, render_gaussian_kernel
+from losses import FocalLossWithLogits, render_gaussian_kernel, render_target_heatmap
 
 # TODO: implement loss functions
 # TODO: implement output decoder
@@ -183,8 +183,14 @@ class CenterNet(pl.LightningModule):
         self.other_heads = other_heads
 
         if loss_weights == None:
-            loss_weights = [0.1, 1]     # default values for centernet
+            loss_weights = {        # default values for centernet
+                "size": 0.1, 
+                "offset": 1
+            }     
         assert len(other_heads) == len(loss_weights)
+        for x in other_heads:
+            assert x in loss_weights
+        self.loss_weights = loss_weights
 
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
@@ -206,9 +212,9 @@ class CenterNet(pl.LightningModule):
         self.learning_rate = lr
 
     def forward(self, **kwargs):
-        # print("Hello", x)
-        # print(x.shape)
-        features = self.backbone(kwargs["image"])
+        img = kwargs["image"]
+
+        features = self.backbone(img)
         output = {}
         for k,v in self.output_heads.items():
             # k is head name, v is that head nn.Module
@@ -216,67 +222,88 @@ class CenterNet(pl.LightningModule):
         
         return output
 
-    def compute_loss(self, batch):
-        img = batch["image"]
-        output = self(img)
+    def compute_loss(self, **kwargs):
+        img = kwargs["image"]                   # NCHW
+        bboxes = kwargs["bboxes"]               # N x detections x 4
+        labels = kwargs["labels"]               # N x detections
+        mask = kwargs["mask"].unsqueeze(-1)     # N x detections x 1, add column dimension to support broadcasting
+
+        output = self(**kwargs)                 # forward pass
         output_h, output_w = output["heatmap"].shape[-2:]
 
+        # NCHW to NWHC, easier to index later
+        output["size"] = output["size"].swapaxes(1,3)
+        output["offset"] = output["offset"].swapaxes(1,3)
+
+        # initialize losses to 0
         losses = {
-            "heatmap": torch.Tensor(0., dtype=torch.float32, device=self.device)
+            "heatmap": torch.tensor(0., dtype=torch.float32, device=self.device)
         }
         for h in self.other_heads:
-            losses[h] = torch.Tensor(0., dtype=torch.float32, device=self.device)
+            losses[h] = torch.tensor(0., dtype=torch.float32, device=self.device)
 
-        target_heatmap = torch.zeros_like(output["heatmap"])
+        # convert relative size to absolute size
+        # NOTE: this modifies the data in place. DO NOT run compute_loss() twice on the same data
+        bboxes[:,[0,2]] *= output_w     # x and w
+        bboxes[:,[1,3]] *= output_h     # y and h
 
-        # convert relative size to absolute size 
-        batch["bboxes"][:,[0,2]] *= output_w
-        batch["bboxes"][:,[1,3]] *= output_h
+        centers = bboxes[:,:,:2]        # x and y
+        true_wh = bboxes[:,:,2:]        # w and h
 
-        # render target heatmap, size and offset maps
-        for bbox, label, mask in zip(batch["bboxes"], batch["labels"], batch["mask"]):
-            center_x, center_y, box_w, box_h = bbox
+        centers_int = centers.long()    # convert to long so can use it as index
+        center_x = centers_int[:,:,0]
+        center_y = centers_int[:,:,1]
 
-            # convert to integers for getting coordinates
-            center_x_int = int(center_x)
-            center_y_int = int(center_y)
+        for b in range(len(bboxes)):
+            # render target heatmap and accumulate focal loss
+            target_heatmap = render_target_heatmap(
+                output["heatmap"].shape[1:], center_x[b], center_y[b], 
+                bboxes[b,:,2], bboxes[b,:,3], labels[b], device=self.device)
+            losses["heatmap"] += self.focal_loss(output["heatmap"][b], target_heatmap)
 
-            if "size" in output:
-                losses["size"] += F.smooth_l1_loss(output["size"][0,center_y_int,center_x_int], box_w, reduction="sum")*mask
-                losses["size"] += F.smooth_l1_loss(output["size"][1,center_y_int,center_x_int], box_h, reduction="sum")*mask
-            if "offset" in output:
-                losses["offset"] += F.smooth_l1_loss(output["offset"][0,center_y_int,center_x_int], center_x-center_x_int)*mask
-                losses["offset"] += F.smooth_l1_loss(output["offset"][0,center_y_int,center_x_int], center_y-center_y_int)*mask
-            if "displacement" in output:
-                pass
+            # extract relevant predictions and calculate smooth l1 loss
+            # use the mask to remove ignore none detection due to padding
+            # NOTE: l1 loss can also be used here
+            pred_sizes = output["size"][b,center_x[b],center_y[b]]
+            size_loss = F.smooth_l1_loss(pred_sizes, true_wh[b], reduction="none")
+            losses["size"] += torch.sum(size_loss * mask[b])
 
-            # render object center to target heatmap
-            target_heatmap[label] = render_gaussian_kernel(target_heatmap[label], center_x_int, center_y_int, box_w, box_h)
+            pred_offset = output["offset"][b,center_x[b],center_y[b]]
+            offset_loss = F.smooth_l1_loss(pred_offset, centers[b] - torch.floor(centers[b]), reduction="none")
+            losses["offset"] += torch.sum(offset_loss * mask[b])
 
-        losses["heatmap"] = self.focal_loss(output["heatmap"], target_heatmap)
+        # average over number of detections
+        N = torch.sum(mask)
+        losses["heatmap"] /= N
+        losses["size"] /= N
+        losses["offset"] /= N
 
         return losses
 
-    # lightning method, return loss here
+    # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
-        losses = self.compute_loss(batch)
+        losses = self.compute_loss(**batch)
         
         total_loss = losses["heatmap"]
         for h in self.other_heads:
-            total_loss += losses[h]
+            total_loss += losses[h] * self.loss_weights[h]
 
-        self.log('train_loss', losses)
+        self.log_dict(losses)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        losses = self.compute_loss(batch)
+        losses = self.compute_loss(**batch)
+
+        self.log_dict(losses)
         # calculate loss and evaluation metrics
 
     def test_step(self, batch, batch_idx):
-        losses = self.compute_loss(batch)
+        losses = self.compute_loss(**batch)
+
+        self.log_dict(losses)
         # same as validation
 
     # lightning method
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer

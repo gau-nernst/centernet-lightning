@@ -7,7 +7,7 @@ from albumentations.pytorch import ToTensorV2
 
 import pytorch_lightning as pl
 
-from datasets import COCODataset
+from datasets import COCODataset, collate_bbox_labels
 from model import ResNetBackbone, CenterNet
 
 def get_train_augmentations(img_width=512, img_height=512):
@@ -30,12 +30,13 @@ def get_train_augmentations(img_width=512, img_height=512):
 
 def train():
     # training hyperparameters
-    num_epochs = 10
-    batch_size = 4
+    num_epochs = 1
+    batch_size = 16
     lr = 1e-4
 
     # set up dataset
-    data_dir = os.path.join(os.environ["HOME"], "thien", "datasets", "COCO")
+    # data_dir = os.path.join(os.environ["HOME"], "thien", "datasets", "COCO")
+    data_dir = "D://datasets/COCO"
     coco_version = "val2017"
     
     train_augment = get_train_augmentations()
@@ -51,3 +52,6 @@ def train():
     trainer = pl.Trainer(gpus=1, max_epochs=num_epochs)
 
     trainer.fit(model, train_dataloader, val_dataloader)
+
+if __name__ == "__main__":
+    train()

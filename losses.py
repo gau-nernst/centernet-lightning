@@ -20,7 +20,7 @@ class FocalLossWithLogits(nn.Module):
         pos_mask = (targets == 1).float()
         neg_mask = (targets < 1).float()
 
-        probs = F.sigmoid(inputs)   # convert logits to probabilities
+        probs = torch.sigmoid(inputs)   # convert logits to probabilities
 
         # use logsigmoid for numerical stability
         pos_loss = -F.logsigmoid(inputs) * (1-probs)**self.alpha * pos_mask  # loss at Gaussian peak
@@ -35,6 +35,30 @@ class FocalLossWithLogits(nn.Module):
             loss = (pos_loss + neg_loss) / N
 
         return loss
+
+def render_target_heatmap(shape: Iterable, center_x: torch.Tensor, center_y: torch.Tensor, box_w: torch.Tensor, box_h: torch.Tensor, indices: torch.Tensor, alpha: float=0.54, device: str="cpu"):
+    heatmap = torch.zeros(shape, dtype=torch.float32, device=device)
+    indices = indices.long()
+
+    # TTFNet. add 1e-4 to variance to avoid division by zero
+    std_w = alpha*box_w/6
+    std_h = alpha*box_h/6
+    var_w = std_w*std_w + 1e-4
+    var_h = std_h*std_h + 1e-4
+
+    # a matrix of (x,y)
+    grid_y, grid_x = torch.meshgrid([
+        torch.arange(shape[1], dtype=torch.float32, device=device),
+        torch.arange(shape[2], dtype=torch.float32, device=device)]
+    )
+
+    for idx,x,y,var_x,var_y in zip(indices, center_x, center_y, var_w, var_h):
+        radius_sq = (x - grid_x)**2/(2*var_x) + (y - grid_y)**2/(2*var_y)
+        gaussian_kernel = torch.exp(-radius_sq)
+        gaussian_kernel[y, x] = 1           # force the center to be 1
+        heatmap[idx] = torch.maximum(heatmap[idx], gaussian_kernel)
+
+    return heatmap
 
 def render_gaussian_kernel(
     heatmap: torch.Tensor,

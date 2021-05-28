@@ -2,21 +2,21 @@ import os
 import random
 
 import torch
-import torch.nn.functional as F
-import albumentations as A
-from torch.utils.data import dataloader
 from torch.utils.data.dataloader import DataLoader
+import pytorch_lightning as pl
+
 from train import get_train_augmentations
 from losses import FocalLossWithLogits, reference_focal_loss, render_gaussian_kernel
 from datasets import COCODataset, collate_bbox_labels
 from model import OutputHead, ResNetBackbone, CenterNet
 
-class TestDatasets:
-    dataset_root = os.path.join(os.environ["HOME"], "thien", "datasets")
-    coco_dir = os.path.join(dataset_root, "COCO")
+# DATASET_ROOT = os.path.join(os.environ["HOME"], "thien", "datasets")
+DATASET_ROOT = os.path.join("D:\\", "datasets")
+COCO_DIR = os.path.join(DATASET_ROOT, "COCO")
 
+class TestDatasets:
     def test_coco(self):
-        ds = COCODataset(self.coco_dir, "val2017")
+        ds = COCODataset(COCO_DIR, "val2017")
 
         rand_idx = random.randint(0,len(ds)-1)
         sample = ds[rand_idx]
@@ -35,7 +35,7 @@ class TestDatasets:
 
     def test_augmentation(self):
         train_augment = get_train_augmentations()
-        ds = COCODataset(self.coco_dir, "val2017", transforms=train_augment)
+        ds = COCODataset(COCO_DIR, "val2017", transforms=train_augment)
 
         rand_idx = random.randint(0,len(ds)-1)
         sample1 = ds[rand_idx]["image"]
@@ -45,8 +45,8 @@ class TestDatasets:
         assert sample1.shape == (3,512,512)     # size is still the same
 
     def test_collate_fn(self):
-        ds = COCODataset(self.coco_dir, "val2017")
-        coco_dataloader = DataLoader(ds, batch_size=4, collate_fn=collate_bbox_labels)
+        ds = COCODataset(COCO_DIR, "val2017")
+        coco_dataloader = DataLoader(ds, batch_size=4, num_workers=2, collate_fn=collate_bbox_labels)
         batch = next(iter(coco_dataloader))
 
         for x in ["image", "bboxes", "labels", "mask"]:
@@ -80,38 +80,54 @@ class TestLosses:
     
 class TestModels:
     INPUT_SIZE = 512
-    OUTPUT_SIZE = INPUT_SIZE/4
-    coco_dir = os.path.join(os.environ["HOME"], "thien", "datasets", "COCO")
-    
+    OUTPUT_SIZE = INPUT_SIZE//4
+    OUTPUT_HEADS = ["heatmap", "size", "offset"]
+
+    ds = COCODataset(COCO_DIR, "val2017")
+    coco_dataloader = DataLoader(ds, batch_size=4, num_workers=2, collate_fn=collate_bbox_labels)
+
     def test_resnet_backbone(self):
         backbone = ResNetBackbone()
-
-        # ds = COCODataset(self.coco_dir, "val2017")
-        # coco_dataloader = DataLoader(ds, batch_size=4, collate_fn=collate_bbox_labels)
-        # batch = next(iter(coco_dataloader))
-        
         sample_input = torch.rand((4,3,self.INPUT_SIZE,self.INPUT_SIZE))
         sample_output = backbone(sample_input)
-        # sample_output = backbone(batch["image"])
+
         assert sample_output.shape == (4,64,self.OUTPUT_SIZE,self.OUTPUT_SIZE)  # output dimension
 
-    def test_centernet(self):
-        ds = COCODataset(self.coco_dir, "val2017")
-        coco_dataloader = DataLoader(ds, batch_size=4, collate_fn=collate_bbox_labels)
-        batch = next(iter(coco_dataloader))
+    def test_forward_pass(self):
+        batch = next(iter(self.coco_dataloader))
 
-        # print(type(batch))
-        # print(batch["image"].shape)
         backbone = ResNetBackbone()
-        model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
+        model = CenterNet(backbone=backbone, num_classes=self.ds.num_classes, batch_size=4)
         
         sample_output = model(**batch)
         
-        for x in ["heatmap", "size", "offset"]:
+        for x in self.OUTPUT_HEADS:
             assert x in sample_output
+        
         # correct output dimension
-        assert sample_output["heatmap"].shape == (4,ds.num_classes,self.OUTPUT_SIZE,self.OUTPUT_SIZE)
+        assert sample_output["heatmap"].shape == (4,self.ds.num_classes,self.OUTPUT_SIZE,self.OUTPUT_SIZE)
         assert sample_output["size"].shape == (4,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)
         assert sample_output["offset"].shape == (4,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)
 
-        # model.compute_loss(batch)
+        # no nan in output
+        for x in ["heatmap", "size", "offset"]:
+            assert not torch.isnan(torch.sum(sample_output[x]))
+
+    def test_compute_loss(self):
+        batch = next(iter(self.coco_dataloader))
+
+        backbone = ResNetBackbone()
+        model = CenterNet(backbone=backbone, num_classes=self.ds.num_classes, batch_size=4)
+
+        losses = model.compute_loss(**batch)
+
+        # correct loss names and loss is not nan
+        for x in self.OUTPUT_HEADS:
+            assert x in losses
+            assert not torch.isnan(losses[x])
+
+    def test_trainer(self):
+        backbone = ResNetBackbone()
+        model = CenterNet(backbone=backbone, num_classes=self.ds.num_classes, batch_size=4)
+        trainer = pl.Trainer(max_steps=2)
+        trainer.fit(model, self.coco_dataloader)
