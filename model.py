@@ -23,7 +23,7 @@ _resnet_mapper = {
 }
 
 class UpsampleBlock(nn.Module):
-    """Upsample block (convolution transpose) with optional DCN
+    """Upsample block (convolution transpose) with optional DCN (currently not supported)
 
     Architecture: conv + conv transpose, with BN and relu
     """
@@ -101,8 +101,10 @@ class ResNetBackbone(nn.Module):
             backbone.layer3,
             backbone.layer4
         )
-        
         resnet_out_channels = 2048
+        
+        # upsampling parameters
+        # NOTE: should these be included in constructor arguments?
         up_channels = [256, 128, 64]    # from CenterNet paper. original PoseNet uses [256,256,256]
         up_kernels = [4, 4, 4]          # from PoseNet paper
         self.upsample = self._make_upsample_stage(
@@ -158,15 +160,23 @@ class OutputHead(nn.Module):
         return out
 
 class CenterNet(pl.LightningModule):
+    """General CenterNet model. Build CenterNet from a given backbone and output
+    """
     supported_heads = ["size", "offset"]
+    output_head_channels ={
+        "size": 2,
+        "offset": 2
+    }
 
     def __init__(
         self, 
         backbone: nn.Module, 
         num_classes: int, 
-        other_heads: Iterable[str]=None, 
-        loss_weights: Iterable[float]=None,
+        other_heads: Iterable[str]=["size", "offset"], 
+        loss_weights: Dict[str,float]=dict(size=0.1,offset=1),
         heatmap_bias: float=-2.7,
+        max_pool_kernel: int=3,
+        num_detections: int=40,
         batch_size: int=4, 
         lr: float=1e-3
         ):
@@ -174,45 +184,41 @@ class CenterNet(pl.LightningModule):
         self.backbone = backbone
         feature_channels = backbone.out_channels
 
-        # other_heads excludes the compulsory heatmap head
-        # loss weights are used to calculated total weighted loss
-        # must match the number of output heads
-        if other_heads == None:
-            other_heads = ["size", "offset"]
-        assert "heatmap" not in other_heads
-        self.other_heads = other_heads
-
-        if loss_weights == None:
-            loss_weights = {        # default values for centernet
-                "size": 0.1, 
-                "offset": 1
-            }     
-        assert len(other_heads) == len(loss_weights)
-        for x in other_heads:
-            assert x in loss_weights
-        self.loss_weights = loss_weights
-
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
         self.output_heads = nn.ModuleDict()
         self.output_heads["heatmap"] = OutputHead(
             feature_channels, num_classes, 
             fill_bias=True, bias_value=heatmap_bias)
-        
+        # other_heads excludes the compulsory heatmap head
         for h in other_heads:
             assert h in self.supported_heads
             self.output_heads[h] = OutputHead(
-                feature_channels, 2, 
+                feature_channels, self.output_head_channels[h], 
                 fill_bias=True, bias_value=0)
+        self.other_heads = other_heads
+
+        # loss weights are used to calculated total weighted loss
+        for x in other_heads:
+            assert x in loss_weights
+        self.loss_weights = loss_weights   
         
+        # parameterized focal loss for heatmap
         self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)
 
-        # for pytorch lightning
+        # for detection decoding
+        # this is used to mimic nms
+        self.nms_max_pool = nn.MaxPool2d(max_pool_kernel, stride=1, padding=(max_pool_kernel-1)//2)     # same padding
+        self.num_detections = num_detections
+
+        # for pytorch lightning tuner
         self.batch_size = batch_size
         self.learning_rate = lr
 
-    def forward(self, **kwargs):
-        img = kwargs["image"]
+    def forward(self, batch):
+        """Return a dictionary of feature maps for each output head. Use this output to either decode to predictions or compute loss.
+        """
+        img = batch["image"]
 
         features = self.backbone(img)
         output = {}
@@ -222,13 +228,15 @@ class CenterNet(pl.LightningModule):
         
         return output
 
-    def compute_loss(self, **kwargs):
-        img = kwargs["image"]                   # NCHW
-        bboxes = kwargs["bboxes"]               # N x detections x 4
-        labels = kwargs["labels"]               # N x detections
-        mask = kwargs["mask"].unsqueeze(-1)     # N x detections x 1, add column dimension to support broadcasting
+    def compute_loss(self, batch):
+        """Return a dictionary of losses for each output head. This method is called during the training step
+        """
+        img = batch["image"]                   # NCHW
+        bboxes = batch["bboxes"]               # N x detections x 4
+        labels = batch["labels"]               # N x detections
+        mask = batch["mask"].unsqueeze(-1)     # N x detections x 1, add column dimension to support broadcasting
 
-        output = self(**kwargs)                 # forward pass
+        output = self(batch)                 # forward pass
         output_h, output_w = output["heatmap"].shape[-2:]
 
         # NCHW to NWHC, easier to index later
@@ -244,8 +252,8 @@ class CenterNet(pl.LightningModule):
 
         # convert relative size to absolute size
         # NOTE: this modifies the data in place. DO NOT run compute_loss() twice on the same data
-        bboxes[:,[0,2]] *= output_w     # x and w
-        bboxes[:,[1,3]] *= output_h     # y and h
+        bboxes[:,:,[0,2]] *= output_w     # x and w
+        bboxes[:,:,[1,3]] *= output_h     # y and h
 
         centers = bboxes[:,:,:2]        # x and y
         true_wh = bboxes[:,:,2:]        # w and h
@@ -253,7 +261,7 @@ class CenterNet(pl.LightningModule):
         centers_int = centers.long()    # convert to long so can use it as index
         center_x = centers_int[:,:,0]
         center_y = centers_int[:,:,1]
-
+ 
         for b in range(len(bboxes)):
             # render target heatmap and accumulate focal loss
             target_heatmap = render_target_heatmap(
@@ -280,27 +288,63 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
+    def decode_detections(self, batch):
+        """Decode model output to detections
+        """
+        # reference implementations
+        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
+        # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
+        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
+        batch_size, channels, height, width = batch.shape           # NCHW
+        
+        # decode heatmap
+        heatmap = torch.sigmoid(batch["heatmap"])                                           # convert to probability
+        heatmap = (heatmap == self.nms_max_pool(heatmap)).float() * heatmap                 # pseudo-nms mask
+        heatmap = heatmap.view(batch_size, channels, -1)                                    # NCHW to NC(HW)
+        topk_scores, topk_indices = torch.topk(heatmap, self.num_detections, dim=-1)        # topk in each class
+        
+        topk_scores = topk_scores.view((batch_size, -1))            # NCK to N(CK)
+        topk_indices = topk_indices.view((batch_size, -1))          
+        
+
+
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
-        losses = self.compute_loss(**batch)
+        losses = self.compute_loss(batch)
         
         total_loss = losses["heatmap"]
         for h in self.other_heads:
             total_loss += losses[h] * self.loss_weights[h]
 
-        self.log_dict(losses)
+        # self.log_dict({"train": losses})
+        for k,v in losses.items():
+            self.log(f"train_{k}_loss", v)
+        self.log("train_total_loss", total_loss)
+
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        losses = self.compute_loss(**batch)
+        losses = self.compute_loss(batch)
 
-        self.log_dict(losses)
+        total_loss = losses["heatmap"]
+        for h in self.other_heads:
+            total_loss += losses[h] * self.loss_weights[h]
+
+        # self.log_dict({"val": losses})
+        for k,v in losses.items():
+            self.log(f"val_{k}_loss", v)
+        self.log("val_total_loss", total_loss)
         # calculate loss and evaluation metrics
+        # log image(img, self.trainer.log_dir)
+        # tensorboard = self.logger.experiment
+        # tensorboard.add_image()
 
     def test_step(self, batch, batch_idx):
-        losses = self.compute_loss(**batch)
+        losses = self.compute_loss(batch)
 
-        self.log_dict(losses)
+        # self.log_dict(losses)
+        for k,v in losses.items():
+            self.log(f"test_{k}_loss", v)
         # same as validation
 
     # lightning method

@@ -1,5 +1,7 @@
+from albumentations.core.serialization import save
 import cv2
 import os
+import pickle
 import copy
 from pycocotools.coco import COCO
 from collections import OrderedDict
@@ -37,6 +39,57 @@ class CenterNetDataset(Dataset):
     def __len__(self):
         return len(self.img_dir)
 
+def prepare_coco_detection(data_dir, coco_name):
+    ann_dir = os.path.join(data_dir, "annotations")
+    ann_file = os.path.join(ann_dir, f"instances_{coco_name}.json")
+
+    save_dir = os.path.join(ann_dir, coco_name)
+    os.makedirs(save_dir, exist_ok=True)
+    detection_file = os.path.join(save_dir, "detections.pkl")
+    label_map_file = os.path.join(save_dir, "label_map.pkl")
+
+    # if already exist on disk, don't do anything
+    if os.path.exists(detection_file) and os.path.exists(label_map_file):
+        return
+
+    # extract only bboxes and ids data, otherwise train set annotations is too large
+    else:
+        coco = COCO(ann_file)
+
+        # since COCO 2017 have missing ids, re-map the ids to class labels
+        categories = OrderedDict(coco.cats)
+        id_to_label = {}
+        label_to_name = {}
+        for i,(k,v) in enumerate(categories.items()):
+            id_to_label[k] = i
+            label_to_name[i] = v["name"]
+
+        with open(label_map_file, "wb") as f:
+            pickle.dump(label_to_name, f)     # save to disk
+
+        img_ids = coco.getImgIds()                          # list of all image ids
+        img_info = coco.loadImgs(img_ids)                   # list of dictionary
+        img_names = [x["file_name"] for x in img_info]      # we only need file_name
+
+        annotate_ids = [coco.getAnnIds(imgIds=x) for x in img_ids]      # get annotations for each image
+        annotates = [coco.loadAnns(ids=x) for x in annotate_ids]        
+
+        bboxes = [[x["bbox"] for x in ann] for ann in annotates]        # we only need bboxes and category_id
+        labels = [[id_to_label[x["category_id"]] for x in ann] for ann in annotates]
+        
+        detection = {
+            "img_names": img_names,
+            "bboxes": bboxes,
+            "labels": labels
+        }
+        with open(detection_file, "wb") as f:
+            pickle.dump(detection, f)          # save to disk
+
+        detection["label_to_name"] = label_to_name
+
+        del coco
+    
+
 class COCODataset(Dataset):
     def __init__(
         self, 
@@ -48,16 +101,20 @@ class COCODataset(Dataset):
         ):
         super(COCODataset, self).__init__()
 
-        # COCO stuff
-        ann_file = os.path.join(data_dir, "annotations", f"instances_{data_name}.json")
-        self.coco = COCO(ann_file)
-        self.img_ids = self.coco.getImgIds()
+        detection_file = os.path.join(data_dir, "annotations", data_name, "detections.pkl")
+        label_map_file = os.path.join(data_dir, "annotations", data_name, "label_map.pkl")
+        with open(detection_file, "rb") as f:
+            detection = pickle.load(f)
+
+        with open(label_map_file, "rb") as f:
+            label_to_name = pickle.load(f)
+
+        self.img_names = detection["img_names"]
+        self.bboxes = detection["bboxes"]
+        self.labels = detection["labels"]
+        self.label_to_name = label_to_name
+        self.num_classes = len(label_to_name)
         self.img_dir = os.path.join(data_dir, data_name)
-        # use ordered dict to make it reproducible
-        ordered_cat = OrderedDict(self.coco.cats)
-        self.id_to_label = {k:i for i,k in enumerate(ordered_cat)}
-        self.label_to_name = {i:v["name"] for i,v in enumerate(ordered_cat.values())}
-        self.num_classes = len(self.id_to_label)
 
         # default transforms is convert to tensor
         if transforms == None:
@@ -74,24 +131,26 @@ class COCODataset(Dataset):
         self.img_height = img_height
 
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, index: int):
         # coco data format https://cocodataset.org/#format-data
-        img_id = self.img_ids[idx]
-        img_info = self.coco.loadImgs(ids=[img_id])[0]
+        # img_id = self.img_ids[index]
+        # img_info = self.coco.loadImgs(ids=[img_id])[0]
         # img_info has the following keys: license, file_name, coco_url, height, width, date_captured, flickr_url, id
-        img_path = os.path.join(self.img_dir, img_info["file_name"])
+        img_path = os.path.join(self.img_dir, self.img_names[index])
 
         # read image with cv2. convert to rgb color
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        ann_ids = self.coco.getAnnIds(imgIds=[img_id])
-        anns = copy.deepcopy(self.coco.loadAnns(ids=ann_ids))
+        # ann_ids = self.coco.getAnnIds(imgIds=[img_id])
+        # anns = copy.deepcopy(self.coco.loadAnns(ids=ann_ids))
         # annotations is a list of annotataion
         # each annotation is a dictionary with keys: segmentation, area, iscrowd, image_id, bbox, category_id, id 
 
-        bboxes = [x["bbox"] for x in anns]
-        labels = [self.id_to_label[x["category_id"]] for x in anns]
+        # bboxes = [x["bbox"] for x in anns]
+        bboxes = self.bboxes[index]
+        # labels = [self.id_to_label[x["category_id"]] for x in anns]
+        labels = self.labels[index]
 
         # self.transforms is an Albumentations Transform instance
         # Albumentations will handle transforming the bounding boxes also
@@ -124,9 +183,9 @@ class COCODataset(Dataset):
         return data
 
     def __len__(self):
-        return len(self.img_ids)
+        return len(self.img_names)
 
-def collate_bbox_labels(batch, pad_value=0):
+def collate_detections_with_padding(batch, pad_value=0):
     output = {
         "image": [],
         "bboxes": [],
