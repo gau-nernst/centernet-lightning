@@ -1,0 +1,20 @@
+MODEL:
+  BACKBONE: resnet50
+  OTHER_HEADS: [size, offset]
+
+DATASET:
+  TRAIN:
+    DATA_DIR: datasets/COCO
+    COCO: True
+    COCO_NAME: train2017
+  
+  VALIDATION:
+    DATA_DIR: datasets/COCO
+    COCO: True
+    COCO_NAME: val2017
+
+TRAINER:
+  EPOCHS: 1
+  BATCH_SIZE: 4
+  LEARNING_RATE: 0.0001
+  OPTIMIZER: adam
