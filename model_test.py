@@ -5,6 +5,7 @@ import pytorch_lightning as pl
 from model import ResNetBackbone, CenterNet
 from datasets import COCODataset, collate_detections_with_padding
 from train import get_train_augmentations
+from losses import render_target_heatmap
 
 
 DATASET_ROOT = os.path.join("datasets")
@@ -68,3 +69,43 @@ class TestModels:
         gpus = 1 if torch.cuda.is_available() else 0
         trainer = pl.Trainer(gpus=gpus, fast_dev_run=2)
         trainer.fit(model, coco_dataloader, coco_dataloader)
+
+    def test_decode_detections(self):
+        shape = (4, self.OUTPUT_SIZE, self.OUTPUT_SIZE)
+        center_x = torch.tensor([10,20])
+        center_y = torch.tensor([10,30])
+        box_w = torch.tensor([10,10])
+        box_h = torch.tensor([10,20])
+        indices = torch.tensor([1,0])
+        
+        x1 = center_x[0]
+        y1 = center_y[0]
+        heatmap = render_target_heatmap(shape, center_x, center_y, box_w, box_h, indices) * 0.95
+        heatmap[indices[0],y1,x1] = 1                   # make the first point having highest score
+        heatmap = -torch.log((1-heatmap) / heatmap)     # convert probability to logit (inverse sigmoid)
+        
+        size = torch.rand((1,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)) * 20
+        offset = torch.rand((1,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)) * 2
+
+        sample_input = {
+            "heatmap": heatmap.unsqueeze(0),
+            "size": size,
+            "offset": offset
+        }
+        backbone = ResNetBackbone()
+        model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
+        
+        output = model.decode_detections(sample_input)
+        for x in ["labels", "bboxes", "scores"]:
+            assert x in output
+        labels = output["labels"].squeeze(dim=0)
+        bboxes = output["bboxes"].squeeze(dim=0)
+        scores = output["scores"].squeeze(dim=0)
+
+        assert labels[0] == indices[0]
+        assert scores[0] == 1
+
+        assert bboxes[0][0] == (x1 + offset[0,0,y1,x1]) / self.OUTPUT_SIZE
+        assert bboxes[0][1] == (y1 + offset[0,1,y1,x1]) / self.OUTPUT_SIZE
+        assert bboxes[0][2] == size[0,0,y1,x1] / self.OUTPUT_SIZE
+        assert bboxes[0][3] == size[0,1,y1,x1] / self.OUTPUT_SIZE

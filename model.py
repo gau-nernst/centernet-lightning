@@ -288,25 +288,49 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, batch):
+    def decode_detections(self, batch: Dict[str, torch.Tensor]):
         """Decode model output to detections
         """
         # reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
-        batch_size, channels, height, width = batch.shape           # NCHW
-        
-        # decode heatmap
-        heatmap = torch.sigmoid(batch["heatmap"])                                           # convert to probability
-        heatmap = (heatmap == self.nms_max_pool(heatmap)).float() * heatmap                 # pseudo-nms mask
-        heatmap = heatmap.view(batch_size, channels, -1)                                    # NCHW to NC(HW)
-        topk_scores, topk_indices = torch.topk(heatmap, self.num_detections, dim=-1)        # topk in each class
-        
-        topk_scores = topk_scores.view((batch_size, -1))            # NCK to N(CK)
-        topk_indices = topk_indices.view((batch_size, -1))          
-        
+        batch_size, channels, height, width = batch["heatmap"].shape
+        heatmap = batch["heatmap"]
+        size_map = batch["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
+        offset_map = batch["offset"].view(batch_size, 2, -1)
 
+        # obtain topk from heatmap
+        heatmap = torch.sigmoid(batch["heatmap"])           # convert to probability
+        nms_mask = (heatmap == self.nms_max_pool(heatmap))  # pseudo-nms, only consider local peaks
+        heatmap = nms_mask.float() * heatmap
+
+        # flatten to N(CHW) to apply topk
+        heatmap = heatmap.view(batch_size, -1)
+        topk_scores, topk_indices = torch.topk(heatmap, self.num_detections)
+
+        # restore flattened indices to class, xy indices
+        topk_c_indices = topk_indices // (height*width)
+        topk_xy_indices = topk_indices % (height*width)
+        topk_y_indices = topk_xy_indices // width
+        topk_x_indices = topk_xy_indices % width
+
+        # extract bboxes (relative scale) at topk xy positions
+        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices) / width
+        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices) / height
+        topk_x_offset = torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
+        topk_y_offset = torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
+
+        topk_x = (topk_x_indices + topk_x_offset) / width
+        topk_y = (topk_y_indices + topk_y_offset) / height
+
+        bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)
+        out = {
+            "labels": topk_c_indices,
+            "bboxes": bboxes,
+            "scores": topk_scores
+        }
+        return out
 
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
