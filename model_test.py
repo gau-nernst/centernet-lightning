@@ -54,7 +54,8 @@ class TestModels:
         backbone = ResNetBackbone()
         model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
 
-        losses = model.compute_loss(batch)
+        output_maps = model(batch)
+        losses = model.compute_loss(output_maps, batch)
 
         # correct loss names and loss is not nan
         for x in self.OUTPUT_HEADS:
@@ -72,15 +73,15 @@ class TestModels:
 
     def test_decode_detections(self):
         shape = (4, self.OUTPUT_SIZE, self.OUTPUT_SIZE)
-        center_x = torch.tensor([10,20])
-        center_y = torch.tensor([10,30])
-        box_w = torch.tensor([10,10])
-        box_h = torch.tensor([10,20])
+        centers = torch.tensor([[10,10], [20,30]])
+        sizes = torch.tensor([[10,10], [10,20]])
         indices = torch.tensor([1,0])
+        mask = torch.tensor([1,1])
         
-        x1 = center_x[0]
-        y1 = center_y[0]
-        heatmap = render_target_heatmap(shape, center_x, center_y, box_w, box_h, indices) * 0.95
+        x1 = centers[0][0]
+        y1 = centers[0][1]
+        
+        heatmap = render_target_heatmap(shape, centers, sizes, indices, mask) * 0.95
         heatmap[indices[0],y1,x1] = 1                   # make the first point having highest score
         heatmap = -torch.log((1-heatmap) / heatmap)     # convert probability to logit (inverse sigmoid)
         
