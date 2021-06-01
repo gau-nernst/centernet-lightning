@@ -1,5 +1,6 @@
 from typing import Dict, Iterable, List
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -9,11 +10,7 @@ import pytorch_lightning as pl
 import math
 
 from losses import FocalLossWithLogits, render_target_heatmap
-
-# TODO: implement loss functions
-# TODO: implement output decoder
-# TODO: render ground-truth outputs from images
-# TODO: use DLA backbone from timm (is there upsample stage from timm?)
+from metrics import eval_detections
 
 _resnet_mapper = {
     "resnet18": torchvision.models.resnet.resnet18,
@@ -27,7 +24,7 @@ class UpsampleBlock(nn.Module):
 
     Architecture: conv + conv transpose, with BN and relu
     """
-    # architecture choices
+    # NOTE: architecture choices
     # conv + deconv (centernet)
     # deconv + conv
     # upsampling + conv
@@ -49,7 +46,7 @@ class UpsampleBlock(nn.Module):
             self.conv = nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1, bias=False)
         self.bn_conv = nn.BatchNorm2d(out_channels)
 
-        # TODO: padding?
+        # NOTE: how to choose padding for conv transpose?
         self.deconv = nn.ConvTranspose2d(
             out_channels, out_channels, deconv_kernel, stride=deconv_stride,
             padding=deconv_pad, output_padding=deconv_out_pad, bias=False)
@@ -57,6 +54,7 @@ class UpsampleBlock(nn.Module):
         self.relu = nn.ReLU()
 
         # default behavior, initialize weights to bilinear upsampling
+        # TF CenterNet does not do this
         if init_bilinear:
             self.init_bilinear_upsampling()
 
@@ -183,6 +181,7 @@ class CenterNet(pl.LightningModule):
         super(CenterNet, self).__init__()
         self.backbone = backbone
         feature_channels = backbone.out_channels
+        self.num_classes = num_classes
 
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
@@ -344,7 +343,6 @@ class CenterNet(pl.LightningModule):
         for h in self.other_heads:
             total_loss += losses[h] * self.loss_weights[h]
 
-        # self.log_dict({"train": losses})
         for k,v in losses.items():
             self.log(f"train_{k}_loss", v)
         self.log("train_total_loss", total_loss)
@@ -359,15 +357,15 @@ class CenterNet(pl.LightningModule):
         for h in self.other_heads:
             total_loss += losses[h] * self.loss_weights[h]
 
-        # self.log_dict({"val": losses})
         for k,v in losses.items():
             self.log(f"val_{k}_loss", v)
         self.log("val_total_loss", total_loss)
 
         pred_detections = self.decode_detections(encoded_output)
-        # eval_metrics = self.evaluate(pred_detections, batch)
+        ap50, ar50 = self.evaluate_batch(pred_detections, batch)
+        self.log("val_ap50", ap50)
+        self.log("val_ar50", ar50)
 
-        # calculate loss and evaluation metrics
         # log image(img, self.trainer.log_dir)
         # tensorboard = self.logger.experiment
         # tensorboard.add_image()
@@ -376,12 +374,39 @@ class CenterNet(pl.LightningModule):
         encoded_output = self(batch)
         losses = self.compute_loss(encoded_output, batch)
 
-        # self.log_dict(losses)
-        for k,v in losses.items():
-            self.log(f"test_{k}_loss", v)
-        # same as validation
+        pred_detections = self.decode_detections(encoded_output)
+        ap50, ar50 = self.evaluate_batch(pred_detections, batch)
+        self.log("test_ap50", ap50)
+        self.log("test_ar50", ar50)
+
+    @torch.no_grad()
+    def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
+        # move to cpu and convert to numpy
+        preds = {k: v.cpu().numpy() for k,v in preds.items()}
+        targets = {k: v.cpu().numpy() for k,v in targets.items()}
+
+        # convert cxcywh to x1y1x2y2
+        convert_cxcywh_to_x1y1x2y2(preds["bboxes"])
+        convert_cxcywh_to_x1y1x2y2(targets["bboxes"])
+
+        ap50, ar50 = eval_detections(preds, targets, self.num_classes)
+        return ap50, ar50
 
     # lightning method
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
+
+
+def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
+    """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
+    """
+    if not inplace:
+        bboxes = bboxes.copy()
+    
+    bboxes[...,0] -= bboxes[...,2] / 2    # x1 = x - w/2
+    bboxes[...,1] -= bboxes[...,3] / 2    # y1 = y - h/2
+    bboxes[...,2] += bboxes[...,0]        # x2 = w + x1
+    bboxes[...,3] -= bboxes[...,1]        # y2 = h + y1
+
+    return bboxes

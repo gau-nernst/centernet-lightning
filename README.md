@@ -51,6 +51,20 @@ pip install -U albumentations --no-binary imgaug,albumentations
 
 ## Usage
 
+The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the given output heads in parallel. `CenterNet` also implements a few functions to help with training and running detections.
+
+Backbones:
+
+- [x] `ResNetBackbone`: implemented using torchvision's ResNet. It's ResNet with an upsample stage, as specified in the original paper. DCN layer is not implemented.
+- [ ] `ResNetFPNBackbone`: not implemented. The author does not implement this, but TensorFlow implements this
+- [ ] `DLABackbone`: not implemented. The author claims this is the best backbone for CenterNet/Track
+
+Output heads:
+
+- [x] `heatmap`: compulsory, class scores at each position
+- [x] `size`: width and height regression, to determin bounding box size
+- [x] `offset`: center x and y offset regression, to refine center's position
+- [ ] `displacement`: for CenterTrack, currently not implemented
 
 ## Training
 

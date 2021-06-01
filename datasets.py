@@ -15,7 +15,6 @@ import torchvision
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# TODO: convert ground truth to appropriate output
 
 class CenterNetDataset(Dataset):
     def __init__(self, img_dir: str) -> None:
@@ -120,7 +119,7 @@ class COCODataset(Dataset):
         if transforms == None:
             # use Albumentation resize to handle bbox resizing also
             # centernet resize input to 512 and 512
-            # yolo bbox format is center xy wh
+            # yolo bbox format is cxcywh
             transforms = A.Compose([
                 A.Resize(img_height, img_width),
                 ToTensorV2()
@@ -133,23 +132,13 @@ class COCODataset(Dataset):
 
     def __getitem__(self, index: int):
         # coco data format https://cocodataset.org/#format-data
-        # img_id = self.img_ids[index]
-        # img_info = self.coco.loadImgs(ids=[img_id])[0]
-        # img_info has the following keys: license, file_name, coco_url, height, width, date_captured, flickr_url, id
         img_path = os.path.join(self.img_dir, self.img_names[index])
 
         # read image with cv2. convert to rgb color
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # ann_ids = self.coco.getAnnIds(imgIds=[img_id])
-        # anns = copy.deepcopy(self.coco.loadAnns(ids=ann_ids))
-        # annotations is a list of annotataion
-        # each annotation is a dictionary with keys: segmentation, area, iscrowd, image_id, bbox, category_id, id 
-
-        # bboxes = [x["bbox"] for x in anns]
         bboxes = self.bboxes[index]
-        # labels = [self.id_to_label[x["category_id"]] for x in anns]
         labels = self.labels[index]
 
         # self.transforms is an Albumentations Transform instance
@@ -167,7 +156,7 @@ class COCODataset(Dataset):
             w = min(w, self.img_width-x)
             h = min(h, self.img_height-y)
 
-            # convert COCO xywh to cxcywh and change to relative scale
+            # convert COCO xywh to cxcywh and convert to relative scale
             center_x = (x + w/2) / self.img_width
             center_y = (y + h/2) / self.img_height
             w = w / self.img_width

@@ -20,7 +20,7 @@ def get_train_augmentations(img_width=512, img_height=512):
     
     # use albumenations to take care of bbox transform
     # original centernet also uses PCA augmentation from cornernet, though it was not mentioned in their paper. The first PCA augmentation appeared in AlexNet https://dl.acm.org/doi/pdf/10.1145/3065386. Albumentations also implements this as FancyPCA
-    # yolo bbox format is center xy wh
+    # yolo bbox format is cxcywh
     train_augmentations = A.Compose([
         A.HorizontalFlip(p=0.5),
         A.RandomResizedCrop(img_height, img_width),
