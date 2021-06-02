@@ -8,9 +8,12 @@ import torchvision
 import pytorch_lightning as pl
 
 import math
+import cv2
+import os
 
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import eval_detections
+from utils import draw_detections
 
 _resnet_mapper = {
     "resnet18": torchvision.models.resnet.resnet18,
@@ -267,11 +270,11 @@ class CenterNet(pl.LightningModule):
         # need to swapaxes since pred_size is N2D but true_wh is ND2
         # use the mask to ignore none detections due to padding
         # NOTE: l1 loss can also be used here
-        size_loss = F.smooth_l1_loss(pred_sizes.swapaxes(1,2), true_wh, reduction="none")
+        size_loss = F.l1_loss(pred_sizes.swapaxes(1,2), true_wh, reduction="none")
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
-        offset_loss = F.smooth_l1_loss(pred_offset.swapaxes(1,2), centers - torch.floor(centers), reduction="none")
+        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), centers - torch.floor(centers), reduction="none")
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
@@ -366,6 +369,18 @@ class CenterNet(pl.LightningModule):
         self.log("val_ap50", ap50)
         self.log("val_ar50", ar50)
 
+        imgs = batch["image"]
+        bboxes = pred_detections["bboxes"]
+        labels = pred_detections["labels"]
+        scores = pred_detections["scores"]
+        sample_imgs = self.draw_sample_images(imgs, bboxes, labels, scores)
+        # self.logger.experiment.add_image("validation images", sample_imgs, 0)
+        sample_imgs = sample_imgs[...,[2,1,0]]      # RGB to BGR
+        for i in range(sample_imgs.shape[0]):
+            filepath = os.path.join("images", f"epoch_{self.current_epoch}")
+            count = len(os.listdir(filepath))
+            filename = os.path.join(filepath, f"{count:04d}.jpg")
+            cv2.imwrite(filename, sample_imgs[i])
         # log image(img, self.trainer.log_dir)
         # tensorboard = self.logger.experiment
         # tensorboard.add_image()
@@ -391,6 +406,22 @@ class CenterNet(pl.LightningModule):
 
         ap50, ar50 = eval_detections(preds, targets, self.num_classes)
         return ap50, ar50
+
+    def draw_sample_images(self, imgs: torch.Tensor, bboxes: torch.Tensor, labels: torch.Tensor, scores: torch.Tensor, indices: Iterable=None, N_samples: int=10):
+        imgs = imgs.cpu().numpy().transpose(0,2,3,1) * 255.     # convert NCHW to NHWC
+        bboxes = bboxes.cpu().numpy()
+        labels = labels.cpu().numpy()
+        scores = scores.cpu().numpy()
+
+        if indices == None:
+            indices = np.random.choice(bboxes.shape[0], min(N_samples, bboxes.shape[0]), replace=False)
+
+        samples = np.zeros((len(indices), *imgs.shape[1:]))
+
+        for i, idx in enumerate(indices):
+            samples[i, ...] = draw_detections(imgs[idx], bboxes[idx], labels[idx], scores[idx], inplace=False, relative_scale=True)
+
+        return samples
 
     # lightning method
     def configure_optimizers(self):
