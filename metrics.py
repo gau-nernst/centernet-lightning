@@ -68,7 +68,7 @@ def tpfp_detections(pred_bboxes: np.ndarray, scores: np.ndarray, target_bboxes: 
         if iou_max[i] >= threshold and not target_matched[iou_argmax[i]]:
             # tp[i] = 1
             tp += 1
-            target_matched = True
+            target_matched[iou_argmax[i]] = True
         else:
             # fp[i] = 1
             fp += 1

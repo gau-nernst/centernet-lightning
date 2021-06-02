@@ -13,7 +13,7 @@ import os
 
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import eval_detections
-from utils import draw_detections
+from utils import convert_cxcywh_to_x1y1x2y2, draw_detections
 
 _resnet_mapper = {
     "resnet18": torchvision.models.resnet.resnet18,
@@ -428,17 +428,3 @@ class CenterNet(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
-
-
-def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
-    """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
-    """
-    if not inplace:
-        bboxes = bboxes.copy()
-    
-    bboxes[...,0] -= bboxes[...,2] / 2    # x1 = x - w/2
-    bboxes[...,1] -= bboxes[...,3] / 2    # y1 = y - h/2
-    bboxes[...,2] += bboxes[...,0]        # x2 = w + x1
-    bboxes[...,3] += bboxes[...,1]        # y2 = h + y1
-
-    return bboxes
