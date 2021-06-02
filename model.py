@@ -233,7 +233,7 @@ class CenterNet(pl.LightningModule):
     def compute_loss(self, output_maps: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
         """Return a dictionary of losses for each output head. This method is called during the training step
         """
-        bboxes = targets["bboxes"]               # ND4
+        bboxes = targets["bboxes"].clone()               # ND4
         labels = targets["labels"]               # ND
         mask = targets["mask"].unsqueeze(-1)     # add column dimension to support broadcasting
 
@@ -248,33 +248,31 @@ class CenterNet(pl.LightningModule):
             "heatmap": torch.tensor(0., dtype=torch.float32, device=self.device)
         }
 
-        # convert relative size to absolute size
-        # NOTE: this modifies the data in place. DO NOT run compute_loss() twice on the same data
-        bboxes[:,:,[0,2]] *= output_w   # x and w
-        bboxes[:,:,[1,3]] *= output_h   # y and h
+        centers = bboxes[:,:,:2].clone()    # x and y, relative scale
+        true_wh = bboxes[:,:,2:]            # w and h, relative scale
 
-        centers = bboxes[:,:,:2]        # x and y
-        true_wh = bboxes[:,:,2:]        # w and h
+        centers[:,:,0] *= output_w      # convert to absolute scale
+        centers[:,:,1] *= output_h
+        centers_int = centers.long()    # convert to long to use as index
 
-        # convert to long so can use it as index
         # combine xy indices for torch.gather()
-        centers_int = centers.long()
-        center_x = centers_int[:,:,0]
-        center_y = centers_int[:,:,1]
         # repeat indices using .expand() to gather on 2 channels
-        xy_indices = (center_y*output_w+center_x).unsqueeze(1).expand((batch_size,2,-1))
+        xy_indices = centers_int[:,:,1] * output_w + centers_int[:,:,0]     # y + w * x
+        xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
         pred_sizes = torch.gather(size_map, dim=-1, index=xy_indices)       # N2D
         pred_offset = torch.gather(offset_map, dim=-1, index=xy_indices)    # N2D
 
         # need to swapaxes since pred_size is N2D but true_wh is ND2
         # use the mask to ignore none detections due to padding
-        # NOTE: l1 loss can also be used here
+        # NOTE: author noted that l1 loss is better than smooth l1 loss
         size_loss = F.l1_loss(pred_sizes.swapaxes(1,2), true_wh, reduction="none")
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
         offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), centers - torch.floor(centers), reduction="none")
+        offset_loss[:,:,0] /= output_w      # convert back to relative scale
+        offset_loss[:,:,1] /= output_h
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
@@ -321,13 +319,13 @@ class CenterNet(pl.LightningModule):
         topk_x_indices = topk_xy_indices % width
 
         # extract bboxes at topk xy positions and convert to relative scales
-        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices) / width
-        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices) / height
+        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices)
+        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices)
         topk_x_offset = torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
         topk_y_offset = torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
 
-        topk_x = (topk_x_indices + topk_x_offset) / width
-        topk_y = (topk_y_indices + topk_y_offset) / height
+        topk_x = topk_x_indices/width + topk_x_offset
+        topk_y = topk_y_indices/height + topk_y_offset
 
         bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
@@ -368,22 +366,14 @@ class CenterNet(pl.LightningModule):
         ap50, ar50 = self.evaluate_batch(pred_detections, batch)
         self.log("val_ap50", ap50)
         self.log("val_ar50", ar50)
-
+        
         imgs = batch["image"]
-        bboxes = pred_detections["bboxes"]
-        labels = pred_detections["labels"]
-        scores = pred_detections["scores"]
-        sample_imgs = self.draw_sample_images(imgs, bboxes, labels, scores)
-        # self.logger.experiment.add_image("validation images", sample_imgs, 0)
-        sample_imgs = sample_imgs[...,[2,1,0]]      # RGB to BGR
-        for i in range(sample_imgs.shape[0]):
-            filepath = os.path.join("images", f"epoch_{self.current_epoch}")
-            count = len(os.listdir(filepath))
-            filename = os.path.join(filepath, f"{count:04d}.jpg")
-            cv2.imwrite(filename, sample_imgs[i])
-        # log image(img, self.trainer.log_dir)
-        # tensorboard = self.logger.experiment
-        # tensorboard.add_image()
+        sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, indices=[0])
+        sample_imgs /= 255.
+        # needs fix
+        self.logger.experiment.add_images(
+            "validation images", sample_imgs, 
+            self.global_step, dataformats="nhwc")
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
@@ -407,19 +397,30 @@ class CenterNet(pl.LightningModule):
         ap50, ar50 = eval_detections(preds, targets, self.num_classes)
         return ap50, ar50
 
-    def draw_sample_images(self, imgs: torch.Tensor, bboxes: torch.Tensor, labels: torch.Tensor, scores: torch.Tensor, indices: Iterable=None, N_samples: int=10):
+    def draw_sample_images(self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], indices: Iterable=None, N_samples: int=10):
         imgs = imgs.cpu().numpy().transpose(0,2,3,1) * 255.     # convert NCHW to NHWC
-        bboxes = bboxes.cpu().numpy()
-        labels = labels.cpu().numpy()
-        scores = scores.cpu().numpy()
+        target_bboxes = targets["bboxes"].cpu().numpy()
+        convert_cxcywh_to_x1y1x2y2(target_bboxes)
+        target_labels = targets["labels"].cpu().numpy().astype(int)
+
+        pred_bboxes = preds["bboxes"].cpu().numpy()
+        convert_cxcywh_to_x1y1x2y2(pred_bboxes)
+        pred_labels = preds["labels"].cpu().numpy().astype(int)
+        pred_scores = preds["scores"].cpu().numpy()
 
         if indices == None:
-            indices = np.random.choice(bboxes.shape[0], min(N_samples, bboxes.shape[0]), replace=False)
+            indices = np.random.choice(imgs.shape[0], min(N_samples, imgs.shape[0]), replace=False)
 
-        samples = np.zeros((len(indices), *imgs.shape[1:]))
+        samples = imgs[indices, ...].copy()
 
         for i, idx in enumerate(indices):
-            samples[i, ...] = draw_detections(imgs[idx], bboxes[idx], labels[idx], scores[idx], inplace=False, relative_scale=True)
+            draw_detections(
+                samples[i], pred_bboxes[idx], pred_labels[idx], pred_scores[idx], 
+                inplace=True, relative_scale=True, color=(255,0,0))
+    
+            draw_detections(
+                samples[i], target_bboxes[idx], target_labels[idx], 
+                inplace=True, relative_scale=True, color=(0,0,255))
 
         return samples
 
@@ -438,6 +439,6 @@ def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
     bboxes[...,0] -= bboxes[...,2] / 2    # x1 = x - w/2
     bboxes[...,1] -= bboxes[...,3] / 2    # y1 = y - h/2
     bboxes[...,2] += bboxes[...,0]        # x2 = w + x1
-    bboxes[...,3] -= bboxes[...,1]        # y2 = h + y1
+    bboxes[...,3] += bboxes[...,1]        # y2 = h + y1
 
     return bboxes
