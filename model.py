@@ -23,8 +23,8 @@ _resnet_mapper = {
     "resnet101": torchvision.models.resnet.resnet101
 }
 
-RED = np.array([1.,0.,0.], dtype=np.float32)
-BLUE = np.array([0.,0.,1.], dtype=np.float32)
+RED = (1., 0., 0.)
+BLUE = (0., 0., 1.)
 
 class UpsampleBlock(nn.Module):
     """Upsample block (convolution transpose) with optional DCN (currently not supported)
@@ -94,6 +94,8 @@ class ResNetBackbone(nn.Module):
     """Modified PoseNet from CenterNet https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
 
     Original PoseNet https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
+    
+    TF implementations: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_feature_extractor.py
     """
     def __init__(self, model: str="resnet50", pretrained: bool=True):
         super(ResNetBackbone, self).__init__()
@@ -257,11 +259,11 @@ class CenterNet(pl.LightningModule):
 
         centers[:,:,0] *= output_w      # convert to absolute scale
         centers[:,:,1] *= output_h
-        centers_int = centers.long()    # convert to long to use as index
+        centers_int = centers.long()    # convert to integer to use as index
 
         # combine xy indices for torch.gather()
         # repeat indices using .expand() to gather on 2 channels
-        xy_indices = centers_int[:,:,1] * output_w + centers_int[:,:,0]     # y + w * x
+        xy_indices = centers_int[:,:,1] * output_w + centers_int[:,:,0]     # y * w + x
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
         pred_sizes = torch.gather(size_map, dim=-1, index=xy_indices)       # N2D
@@ -274,9 +276,8 @@ class CenterNet(pl.LightningModule):
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
+        # NOTE: offset is in absolute scale (float number) of output heatmap
         offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), centers - torch.floor(centers), reduction="none")
-        offset_loss[:,:,0] /= output_w      # convert back to relative scale
-        offset_loss[:,:,1] /= output_h
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
@@ -300,26 +301,29 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, encoded_output: Dict[str, torch.Tensor]):
+    def decode_detections(self, encoded_output: Dict[str, torch.Tensor], num_detections: int=None):
         """Decode model output to detections
         """
         # reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
+        if num_detections == None:
+            num_detections = self.num_detections
+
         batch_size, channels, height, width = encoded_output["heatmap"].shape
         heatmap = encoded_output["heatmap"]
         size_map = encoded_output["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
         offset_map = encoded_output["offset"].view(batch_size, 2, -1)
 
         # obtain topk from heatmap
-        heatmap = torch.sigmoid(encoded_output["heatmap"])  # convert to probability
+        heatmap = torch.sigmoid(encoded_output["heatmap"])  # convert to probability NOTE: is this necessary? sigmoid is a monotonic increasing function. max order will be preserved
         nms_mask = (heatmap == self.nms_max_pool(heatmap))  # pseudo-nms, only consider local peaks
         heatmap = nms_mask.float() * heatmap
 
         # flatten to N(CHW) to apply topk
         heatmap = heatmap.view(batch_size, -1)
-        topk_scores, topk_indices = torch.topk(heatmap, self.num_detections)
+        topk_scores, topk_indices = torch.topk(heatmap, num_detections)
 
         # restore flattened indices to class, xy indices
         topk_c_indices = topk_indices // (height*width)
@@ -327,14 +331,16 @@ class CenterNet(pl.LightningModule):
         topk_y_indices = topk_xy_indices // width
         topk_x_indices = topk_xy_indices % width
 
-        # extract bboxes at topk xy positions and convert to relative scales
+        # extract bboxes at topk xy positions
+        # bbox wh are already in relative scale
+        # bbox xy offset are in absolute scale of output heatmap
         topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices)
         topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices)
         topk_x_offset = torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
         topk_y_offset = torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
 
-        topk_x = topk_x_indices/width + topk_x_offset
-        topk_y = topk_y_indices/height + topk_y_offset
+        topk_x = (topk_x_indices + topk_x_offset) / width
+        topk_y = (topk_y_indices + topk_y_offset) / height
 
         bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
@@ -371,7 +377,7 @@ class CenterNet(pl.LightningModule):
             self.log(f"val_{k}_loss", v)
         self.log("val_total_loss", total_loss)
 
-        pred_detections = self.decode_detections(encoded_output)
+        pred_detections = self.decode_detections(encoded_output, num_detections=10)
         ap50, ar50 = self.evaluate_batch(pred_detections, batch)
         self.log("val_ap50", ap50)
         self.log("val_ar50", ar50)
@@ -379,26 +385,29 @@ class CenterNet(pl.LightningModule):
         # only log sample images for the first validation batch
         if batch_idx == 0:
             imgs = batch["image"]
-            
+            num_samples = 8
+
             # draw bounding boxes on val images
-            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, N_samples=8)
+            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, N_samples=num_samples)
+            sample_imgs = sample_imgs.transpose(0,3,1,2)            # NHWC to NCHW
+            sample_imgs = torchvision.utils.make_grid(torch.from_numpy(sample_imgs), nrow=num_samples)
             
-            self.logger.experiment.add_images(
+            self.logger.experiment.add_image(
                 "validation images", sample_imgs, 
-                self.global_step, dataformats="nhwc")
+                self.global_step, dataformats="chw")
 
             # log output heatmap
-            pred_heatmap = torch.sigmoid(encoded_output["heatmap"])     # convert to probability
+            pred_heatmap = torch.sigmoid(encoded_output["heatmap"][:num_samples])     # convert to probability
             pred_heatmap, _ = torch.max(pred_heatmap, dim=1)            # aggregate heatmaps across classes/channels
             pred_heatmap = pred_heatmap.cpu().numpy()
             pred_heatmap_scaled = pred_heatmap / np.max(pred_heatmap)   # scaled to [0,1]
             
             cm = plt.get_cmap("viridis")        # apply color map
-            pred_heatmap = cm(pred_heatmap)[...,:3].transpose(0,3,1,2)
+            pred_heatmap = cm(pred_heatmap)[...,:3].transpose(0,3,1,2)      # NHWC to NCHW
             pred_heatmap_scaled = cm(pred_heatmap_scaled)[...,:3].transpose(0,3,1,2)
 
-            pred_heatmap = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap), nrow=4)
-            pred_heatmap_scaled = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap_scaled), nrow=4)
+            pred_heatmap = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap), nrow=num_samples)
+            pred_heatmap_scaled = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap_scaled), nrow=num_samples)
 
             self.logger.experiment.add_image(
                 "predicted heatmap", pred_heatmap,
