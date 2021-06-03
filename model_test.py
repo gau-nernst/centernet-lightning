@@ -106,7 +106,7 @@ class TestModels:
         assert labels[0] == indices[0]
         assert scores[0] == 1
 
-        assert bboxes[0][0] == x1 / self.OUTPUT_SIZE + offset[0,0,y1,x1]
-        assert bboxes[0][1] == y1 / self.OUTPUT_SIZE + offset[0,1,y1,x1]
+        assert bboxes[0][0] == (x1 + offset[0,0,y1,x1]) / self.OUTPUT_SIZE
+        assert bboxes[0][1] == (y1 + offset[0,1,y1,x1]) / self.OUTPUT_SIZE
         assert bboxes[0][2] == size[0,0,y1,x1]
         assert bboxes[0][3] == size[0,1,y1,x1]

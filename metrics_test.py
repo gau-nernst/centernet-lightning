@@ -34,8 +34,8 @@ class TestMetrics:
         assert np.max(iou_matrix) <= 1          # all values < 1
         assert not np.isnan(iou_matrix.sum())   # no nan
 
-        assert iou_matrix[2,2] == 0     # test no overlap
-        assert iou_matrix[3,3] == 1     # test full overlap
+        assert iou_matrix[2,2] == 0                 # test no overlap
+        assert np.abs(iou_matrix[3,3] - 1) < 1e-3   # test full overlap
 
         # handle empty array
         iou_matrix = compute_iou_matrix(bboxes1, np.array([]))
