@@ -9,7 +9,7 @@ class TestMetrics:
         [30,30,40,40],
         [4,10,40,20],
         [24,40,50,60]
-    ])
+    ]) / 128
     pred_scores = np.array([0.8, 0.2, 0.4, 0.9, 0.5, 0.2])
     pred_labels = np.array([0, 1, 0, 2, 1, 2])
     
@@ -18,7 +18,7 @@ class TestMetrics:
         [10,30,15,40],
         [25,25,30,30],
         [30,30,40,40]
-    ])
+    ]) / 128
     target_labels = np.array([0, 0, 0, 2, 2, 2])
 
     num_classes = 4
