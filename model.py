@@ -13,7 +13,7 @@ import os
 
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import eval_detections
-from utils import convert_cxcywh_to_x1y1x2y2, draw_detections
+from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes, draw_heatmap
 
 _resnet_mapper = {
     "resnet18": torchvision.models.resnet.resnet18,
@@ -277,9 +277,14 @@ class CenterNet(pl.LightningModule):
         losses["offset"] = offset_loss
 
         for b in range(batch_size):
+            # convert wh to absolute scale
+            abs_wh = true_wh[b].clone()
+            abs_wh[:,0] *= output_w
+            abs_wh[:,1] *= output_h
+
             # render target heatmap and accumulate focal loss
             target_heatmap = render_target_heatmap(
-                heatmap.shape[1:], centers_int[b], true_wh[b], 
+                heatmap.shape[1:], centers_int[b], abs_wh, 
                 labels[b], mask[b], device=self.device)
             losses["heatmap"] += self.focal_loss(heatmap[b], target_heatmap)
 
@@ -367,13 +372,15 @@ class CenterNet(pl.LightningModule):
         self.log("val_ap50", ap50)
         self.log("val_ar50", ar50)
         
-        imgs = batch["image"]
-        sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, indices=[0])
-        sample_imgs /= 255.
-        # needs fix
-        self.logger.experiment.add_images(
-            "validation images", sample_imgs, 
-            self.global_step, dataformats="nhwc")
+        if batch_idx == 0:
+            imgs = batch["image"]
+            heatmap = encoded_output["heatmap"]
+            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, heatmap, N_samples=10)
+            sample_imgs = sample_imgs.astype(np.float32) / 255.
+            
+            self.logger.experiment.add_images(
+                "validation images", sample_imgs, 
+                self.global_step, dataformats="nhwc")
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
@@ -397,8 +404,14 @@ class CenterNet(pl.LightningModule):
         ap50, ar50 = eval_detections(preds, targets, self.num_classes)
         return ap50, ar50
 
-    def draw_sample_images(self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], indices: Iterable=None, N_samples: int=10):
-        imgs = imgs.cpu().numpy().transpose(0,2,3,1) * 255.     # convert NCHW to NHWC
+    @torch.no_grad()
+    def draw_sample_images(
+        self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], 
+        heatmap: torch.Tensor, indices: Iterable=None, N_samples: int=10
+        ):
+        imgs = imgs.cpu().numpy().transpose(0,2,3,1)     # convert NCHW to NHWC
+        heatmap = heatmap.cpu().numpy().transpose(0,2,3,1)
+
         target_bboxes = targets["bboxes"].cpu().numpy()
         convert_cxcywh_to_x1y1x2y2(target_bboxes)
         target_labels = targets["labels"].cpu().numpy().astype(int)
@@ -409,18 +422,26 @@ class CenterNet(pl.LightningModule):
         pred_scores = preds["scores"].cpu().numpy()
 
         if indices == None:
-            indices = np.random.choice(imgs.shape[0], min(N_samples, imgs.shape[0]), replace=False)
+            # indices = np.random.choice(imgs.shape[0], min(N_samples, imgs.shape[0]), replace=False)
+            indices = np.arange(min(imgs.shape[0], N_samples))
 
-        samples = imgs[indices, ...].copy()
+        # is there a need to .copy()?
+        samples = imgs[indices, ...].copy() * 255.
+        samples = samples.astype(np.uint8)
 
         for i, idx in enumerate(indices):
-            draw_detections(
+            draw_bboxes(
                 samples[i], pred_bboxes[idx], pred_labels[idx], pred_scores[idx], 
                 inplace=True, relative_scale=True, color=(255,0,0))
     
-            draw_detections(
+            draw_bboxes(
                 samples[i], target_bboxes[idx], target_labels[idx], 
                 inplace=True, relative_scale=True, color=(0,0,255))
+
+            heatmap_i = 1 / (1 + np.exp(-heatmap[idx]))             # apply sigmoid
+            heatmap_i = (heatmap_i * 255.).astype(np.uint8)         # scale to 255
+            heatmap_i = cv2.resize(heatmap_i, samples.shape[1:3])   # resize to image size
+            draw_heatmap(samples[i], heatmap_i, inplace=True)
 
         return samples
 

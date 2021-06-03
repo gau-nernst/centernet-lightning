@@ -14,8 +14,12 @@ def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
 
     return bboxes
 
-def draw_detections(img: np.ndarray, bboxes: np.ndarray, labels: np.ndarray, scores: np.ndarray=None, inplace: bool=True, relative_scale: bool=False, color=(255,0,0)):
-    """x1y1x2y2 format
+def draw_bboxes(img: np.ndarray, bboxes: np.ndarray, labels: np.ndarray, scores: np.ndarray=None, inplace: bool=True, relative_scale: bool=False, color=(255,0,0)):
+    """Draw bounding boxes on an image using `cv2`
+    
+    Args:
+        `img`: RGB image in HWC format. dtype is uint8 [0,255]
+        `bboxes`: x1y1x2y2 format
     """
     if not inplace:
         img = img.copy()
@@ -38,4 +42,17 @@ def draw_detections(img: np.ndarray, bboxes: np.ndarray, labels: np.ndarray, sco
         cv2.rectangle(img, pt1, pt2, color, thickness=1)
         cv2.putText(img, text, pt1, cv2.FONT_HERSHEY_PLAIN, 1, text_color, thickness=1)
 
+    return img
+
+def draw_heatmap(img: np.ndarray, heatmap: np.ndarray, inplace: bool=True):
+    """Draw heatmap on image. Both `img` and `heatmap` are in HWC format
+    """
+    if not inplace:
+        img = img.copy()
+
+    if heatmap.shape[-1] > 1:
+        heatmap = np.max(heatmap, axis=-1)   # reduce to 1 channel
+
+    # blend to first channel, using max
+    img[:,:,0] = np.maximum(img[:,:,0], heatmap, out=img[:,:,0])
     return img
