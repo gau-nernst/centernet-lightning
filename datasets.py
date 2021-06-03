@@ -73,8 +73,26 @@ def prepare_coco_detection(data_dir, coco_name):
         annotate_ids = [coco.getAnnIds(imgIds=x) for x in img_ids]      # get annotations for each image
         annotates = [coco.loadAnns(ids=x) for x in annotate_ids]        
 
-        bboxes = [[x["bbox"] for x in ann] for ann in annotates]        # we only need bboxes and category_id
-        labels = [[id_to_label[x["category_id"]] for x in ann] for ann in annotates]
+        bboxes = []
+        labels = []
+        for ann in annotates:       # outer loop is loop over images
+            img_bboxes = []
+            img_labels = []
+            for detection in ann:   # inner loop is loop over detections in an image
+                bbox = detection["bbox"]
+                cat_id = detection["category_id"]
+
+                bbox[2] = max(bbox[2], 1)   # clip width and height to 1
+                bbox[3] = max(bbox[3], 1)
+            
+                img_bboxes.append(bbox)
+                img_labels.append(id_to_label[cat_id])
+
+            bboxes.append(img_bboxes)
+            labels.append(img_labels)
+
+        # bboxes = [[x["bbox"] for x in ann] for ann in annotates]        # we only need bboxes and category_id
+        # labels = [[id_to_label[x["category_id"]] for x in ann] for ann in annotates]
         
         detection = {
             "img_names": img_names,
@@ -151,8 +169,14 @@ class COCODataset(Dataset):
         for i in range(len(bboxes)):
             x,y,w,h = bboxes[i]
             # clip boxes
-            x = max(x,0)
-            y = max(y,0)
+            # x = max(x,0)
+            # y = max(y,0)
+            if x < 0:
+                w = w + x
+                x = 0
+            if y < 0:
+                h = h + y
+                y = 0
             w = min(w, self.img_width-x)
             h = min(h, self.img_height-y)
 
