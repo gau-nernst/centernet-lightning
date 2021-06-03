@@ -35,10 +35,9 @@ def draw_bboxes(img: np.ndarray, bboxes: np.ndarray, labels: np.ndarray, scores:
     for i in range(bboxes.shape[0]):
         pt1 = bboxes[i,:2].astype(int)
         pt2 = bboxes[i,2:].astype(int)
-        text = f"{labels[i]} {scores[i]:4f}"
+        text = f"{labels[i]} {scores[i]:.4f}"
 
         text_color = (0,0,0)
-
         cv2.rectangle(img, pt1, pt2, color, thickness=1)
         cv2.putText(img, text, pt1, cv2.FONT_HERSHEY_PLAIN, 1, text_color, thickness=1)
 

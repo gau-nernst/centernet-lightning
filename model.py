@@ -10,6 +10,7 @@ import pytorch_lightning as pl
 import math
 import cv2
 import os
+import matplotlib.pyplot as plt
 
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import eval_detections
@@ -21,6 +22,9 @@ _resnet_mapper = {
     "resnet50": torchvision.models.resnet.resnet50, 
     "resnet101": torchvision.models.resnet.resnet101
 }
+
+RED = np.array([1.,0.,0.], dtype=np.float32)
+BLUE = np.array([0.,0.,1.], dtype=np.float32)
 
 class UpsampleBlock(nn.Module):
     """Upsample block (convolution transpose) with optional DCN (currently not supported)
@@ -372,15 +376,37 @@ class CenterNet(pl.LightningModule):
         self.log("val_ap50", ap50)
         self.log("val_ar50", ar50)
         
+        # only log sample images for the first validation batch
         if batch_idx == 0:
             imgs = batch["image"]
-            heatmap = encoded_output["heatmap"]
-            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, heatmap, N_samples=10)
-            sample_imgs = sample_imgs.astype(np.float32) / 255.
+            
+            # draw bounding boxes on val images
+            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, N_samples=8)
             
             self.logger.experiment.add_images(
                 "validation images", sample_imgs, 
                 self.global_step, dataformats="nhwc")
+
+            # log output heatmap
+            pred_heatmap = torch.sigmoid(encoded_output["heatmap"])     # convert to probability
+            pred_heatmap, _ = torch.max(pred_heatmap, dim=1)            # aggregate heatmaps across classes/channels
+            pred_heatmap = pred_heatmap.cpu().numpy()
+            pred_heatmap_scaled = pred_heatmap / np.max(pred_heatmap)   # scaled to [0,1]
+            
+            cm = plt.get_cmap("viridis")        # apply color map
+            pred_heatmap = cm(pred_heatmap)[...,:3].transpose(0,3,1,2)
+            pred_heatmap_scaled = cm(pred_heatmap_scaled)[...,:3].transpose(0,3,1,2)
+
+            pred_heatmap = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap), nrow=4)
+            pred_heatmap_scaled = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap_scaled), nrow=4)
+
+            self.logger.experiment.add_image(
+                "predicted heatmap", pred_heatmap,
+                self.global_step, dataformats="chw")
+            
+            self.logger.experiment.add_image(
+                "predicted heatmap scaled", pred_heatmap_scaled,
+                self.global_step, dataformats="chw")
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
@@ -406,11 +432,13 @@ class CenterNet(pl.LightningModule):
 
     @torch.no_grad()
     def draw_sample_images(
-        self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], 
-        heatmap: torch.Tensor, indices: Iterable=None, N_samples: int=10
+        self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], 
+        targets: Dict[str, torch.Tensor], N_samples: int=8
         ):
-        imgs = imgs.cpu().numpy().transpose(0,2,3,1)     # convert NCHW to NHWC
-        heatmap = heatmap.cpu().numpy().transpose(0,2,3,1)
+        indices = torch.arange(min(imgs.shape[0], N_samples))
+        
+        samples = imgs[indices].cpu().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
+        samples = np.ascontiguousarray(samples[:,::2,::2,:])        # fast downsample via resampling  
 
         target_bboxes = targets["bboxes"].cpu().numpy()
         convert_cxcywh_to_x1y1x2y2(target_bboxes)
@@ -421,27 +449,14 @@ class CenterNet(pl.LightningModule):
         pred_labels = preds["labels"].cpu().numpy().astype(int)
         pred_scores = preds["scores"].cpu().numpy()
 
-        if indices == None:
-            # indices = np.random.choice(imgs.shape[0], min(N_samples, imgs.shape[0]), replace=False)
-            indices = np.arange(min(imgs.shape[0], N_samples))
-
-        # is there a need to .copy()?
-        samples = imgs[indices, ...].copy() * 255.
-        samples = samples.astype(np.uint8)
-
         for i, idx in enumerate(indices):
             draw_bboxes(
                 samples[i], pred_bboxes[idx], pred_labels[idx], pred_scores[idx], 
-                inplace=True, relative_scale=True, color=(255,0,0))
+                inplace=True, relative_scale=True, color=RED)
     
             draw_bboxes(
                 samples[i], target_bboxes[idx], target_labels[idx], 
-                inplace=True, relative_scale=True, color=(0,0,255))
-
-            heatmap_i = 1 / (1 + np.exp(-heatmap[idx]))             # apply sigmoid
-            heatmap_i = (heatmap_i * 255.).astype(np.uint8)         # scale to 255
-            heatmap_i = cv2.resize(heatmap_i, samples.shape[1:3])   # resize to image size
-            draw_heatmap(samples[i], heatmap_i, inplace=True)
+                inplace=True, relative_scale=True, color=BLUE)
 
         return samples
 
