@@ -86,7 +86,7 @@ class TestModels:
         heatmap = -torch.log((1-heatmap) / heatmap)     # convert probability to logit (inverse sigmoid)
         
         size = torch.rand((1,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)) * 20
-        offset = torch.rand((1,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE)) * 2
+        offset = torch.rand((1,2,self.OUTPUT_SIZE,self.OUTPUT_SIZE))
 
         sample_input = {
             "heatmap": heatmap.unsqueeze(0),
@@ -106,7 +106,7 @@ class TestModels:
         assert labels[0] == indices[0]
         assert scores[0] == 1
 
-        assert bboxes[0][0] == (x1 + offset[0,0,y1,x1]) / self.OUTPUT_SIZE
-        assert bboxes[0][1] == (y1 + offset[0,1,y1,x1]) / self.OUTPUT_SIZE
-        assert bboxes[0][2] == size[0,0,y1,x1] / self.OUTPUT_SIZE
-        assert bboxes[0][3] == size[0,1,y1,x1] / self.OUTPUT_SIZE
+        assert bboxes[0][0] == x1 / self.OUTPUT_SIZE + offset[0,0,y1,x1]
+        assert bboxes[0][1] == y1 / self.OUTPUT_SIZE + offset[0,1,y1,x1]
+        assert bboxes[0][2] == size[0,0,y1,x1]
+        assert bboxes[0][3] == size[0,1,y1,x1]
