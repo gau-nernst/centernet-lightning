@@ -34,6 +34,7 @@ def train(config):
     # training hyperparameters
     num_epochs = config["TRAINER"]["EPOCHS"]
     batch_size = config["TRAINER"]["BATCH_SIZE"]
+    optimizer = config["TRAINER"]["OPTIMIZER"]
     lr = config["TRAINER"]["LEARNING_RATE"]
 
     # set up dataset
@@ -62,11 +63,14 @@ def train(config):
     upsample_init = config["MODEL"]["BACKBONE"]["UPSAMPLE_INIT_BILINEAR"]
     other_heads = config["MODEL"]["OUTPUT_HEADS"]["OTHER_HEADS"]
     heatmap_bias = config["MODEL"]["OUTPUT_HEADS"]["HEATMAP_BIAS"]
+    loss_weights = config["MODEL"]["OUTPUT_HEADS"]["LOSS_WEIGHTS"]
+    loss_weights = {k.lower(): v for k,v in loss_weights.items()}
 
     backbone = ResNetBackbone(model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
-        heatmap_bias=heatmap_bias, batch_size=batch_size, lr=lr)
+        heatmap_bias=heatmap_bias, loss_weights=loss_weights,
+        batch_size=batch_size, optimizer=optimizer, lr=lr)
     
     trainer = pl.Trainer(
         gpus=1, 

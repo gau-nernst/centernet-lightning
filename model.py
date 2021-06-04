@@ -23,6 +23,12 @@ _resnet_mapper = {
     "resnet101": torchvision.models.resnet.resnet101
 }
 
+_optimizer_mapper = {
+    "sgd": torch.optim.SGD,
+    "adam": torch.optim.Adam,
+    "rmsprop": torch.optim.RMSprop
+}
+
 RED = (1., 0., 0.)
 BLUE = (0., 0., 1.)
 
@@ -188,13 +194,15 @@ class CenterNet(pl.LightningModule):
         heatmap_bias: float=None,
         max_pool_kernel: int=3,
         num_detections: int=40,
-        batch_size: int=4, 
+        batch_size: int=4,
+        optimizer: str="adam",
         lr: float=1e-3
         ):
         super(CenterNet, self).__init__()
         self.backbone = backbone
         feature_channels = backbone.out_channels
         self.num_classes = num_classes
+        self.optimizer_name = optimizer
 
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
@@ -226,6 +234,10 @@ class CenterNet(pl.LightningModule):
         # for pytorch lightning tuner
         self.batch_size = batch_size
         self.learning_rate = lr
+
+        # log hyperparameters
+        self.save_hyperparameters({"backbone": backbone.__class__.__name__})
+        self.save_hyperparameters("num_classes", "other_heads", "loss_weights", "heatmap_bias", "max_pool_kernel", "num_detections", "batch_size", "optimizer", "lr")      
 
     def forward(self, batch):
         """Return a dictionary of feature maps for each output head. Use this output to either decode to predictions or compute loss.
@@ -487,5 +499,7 @@ class CenterNet(pl.LightningModule):
 
     # lightning method
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer_algo = _optimizer_mapper.get(self.optimizer_name, torch.optim.Adam)
+        optimizer = optimizer_algo(self.parameters(), lr=self.learning_rate)
+        # lr scheduler
         return optimizer
