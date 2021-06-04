@@ -44,6 +44,7 @@ Install other dependencies
 
 ```bash
 conda install cython
+conda install pytorch-lightning -c conda-forge
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
 pip install opencv-python
 pip install -U albumentations --no-binary imgaug,albumentations
@@ -88,13 +89,13 @@ COCO
 ├── train2017/
 ```
 
-pycocotools loads all annotation data into memory, which can be very large for COCO train set, thus not efficient for pytorch DataLoader. Run `prepare_coco_detection()` function from `datasets.py` to extract only the necessary information (image file paths, bounding boxes and labels) and serialize it to disk with pickle (note: pickle is platform dependent). `COCODataset` reads this pickle file instead of the original annotation file.
+pycocotools loads all annotation data into memory, which can be very large for COCO train set, thus it is not efficient for pytorch DataLoader. Run `prepare_coco_detection()` function from `datasets.py` to extract only the necessary information (image file paths, bounding boxes and labels) and serialize it to disk with pickle (note: pickle is platform dependent). `COCODataset` reads this pickle file instead of the original annotation file.
 
 ```python
 from datasets import prepare_coco_detection
 
 prepare_coco_detection(coco_dir, "val2017")
-prepare_coco_detection(coco_dir, "train2017)
+prepare_coco_detection(coco_dir, "train2017")
 ```
 
 COCO dataset then can be initialized
@@ -127,4 +128,5 @@ Unsupported features from original CenterNet:
 Notable modifications:
 
 - Focal loss: use `torch.logsigmoid()` to improve numerical stability when calculating focal loss. [CenterNet-better-plus](https://github.com/lbin/CenterNet-better-plus) and [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet) clamp input tensor.
-- Gaussian render kernel: following [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet), the Gaussian kernel to render ground truth heatmap follows [TTFNet](https://arxiv.org/abs/1909.00700) formulation, which is simpler (and supposedly better) than the original CenterNet (which was taken from RetinaNet)
+- Gaussian render kernel: following [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet), the Gaussian kernel to render ground truth heatmap follows [TTFNet](https://arxiv.org/abs/1909.00700) formulation, which is simpler (and supposedly better) than the original CenterNet (which was actually taken from CornerNet).
+- Size regression: size output from the model is interpreted as relative scale (normalized by image width and height), instead of pixel scale in the original paper. This requires compensation in size loss weight (lambda_size), which is set to 1 instead of 0.1 in this case.
