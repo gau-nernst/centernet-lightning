@@ -52,19 +52,21 @@ def train(config):
 
     train_dataloader = DataLoader(
         train_dataset, collate_fn=collate_detections_with_padding,
-        batch_size=batch_size, num_workers=4, shuffle=True)
+        batch_size=batch_size, num_workers=4, shuffle=True, pin_memory=True)
     val_dataloader = DataLoader(
         val_dataset, collate_fn=collate_detections_with_padding,
         batch_size=batch_size, num_workers=4, pin_memory=True)
 
     # set up pytorch lightning model and trainer
-    backbone_archi = config["MODEL"]["BACKBONE"]
-    other_heads = config["MODEL"]["OTHER_HEADS"]
+    backbone_archi = config["MODEL"]["BACKBONE"]["ARCHITECTURE"]
+    upsample_init = config["MODEL"]["BACKBONE"]["UPSAMPLE_INIT_BILINEAR"]
+    other_heads = config["MODEL"]["OUTPUT_HEADS"]["OTHER_HEADS"]
+    heatmap_bias = config["MODEL"]["OUTPUT_HEADS"]["HEATMAP_BIAS"]
 
-    backbone = ResNetBackbone(model=backbone_archi, pretrained=True)
+    backbone = ResNetBackbone(model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
-        batch_size=batch_size, lr=lr)
+        heatmap_bias=heatmap_bias, batch_size=batch_size, lr=lr)
     
     trainer = pl.Trainer(
         gpus=1, 

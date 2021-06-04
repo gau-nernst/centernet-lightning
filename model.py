@@ -97,7 +97,7 @@ class ResNetBackbone(nn.Module):
     
     TF implementations: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_feature_extractor.py
     """
-    def __init__(self, model: str="resnet50", pretrained: bool=True):
+    def __init__(self, model: str="resnet50", pretrained: bool=True, upsample_init_bilinear: bool=True):
         super(ResNetBackbone, self).__init__()
         # downsampling path from resnet
         backbone = _resnet_mapper[model](pretrained=pretrained)
@@ -117,7 +117,8 @@ class ResNetBackbone(nn.Module):
         self.upsample = self._make_upsample_stage(
             in_channels=resnet_out_channels, 
             up_channels=up_channels, 
-            up_kernels=up_kernels)
+            up_kernels=up_kernels,
+            init_bilinear=upsample_init_bilinear)
         self.out_channels = up_channels[-1]
 
     def forward(self, x):
@@ -130,16 +131,19 @@ class ResNetBackbone(nn.Module):
         self,
         in_channels: int, 
         up_channels: List[int],
-        up_kernels: List[int]
+        up_kernels: List[int],
+        init_bilinear: bool=True
         ):
         layers = []
         layers.append(UpsampleBlock(
-            in_channels, up_channels[0], deconv_kernel=up_kernels[0]
+            in_channels, up_channels[0], deconv_kernel=up_kernels[0], 
+            init_bilinear=init_bilinear
         ))
 
         for i in range(len(up_channels)-1):
             layers.append(UpsampleBlock(
-                up_channels[i], up_channels[i+1], deconv_kernel=up_kernels[i+1]
+                up_channels[i], up_channels[i+1], deconv_kernel=up_kernels[i+1], 
+                init_bilinear=init_bilinear
             ))
 
         return nn.Sequential(*layers)
@@ -149,15 +153,15 @@ class OutputHead(nn.Module):
     """
     def __init__(
         self, in_channels: int, out_channels: int, 
-        fill_bias: bool=False, bias_value: float=0
+        fill_bias: float=None
         ):
         super(OutputHead, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(out_channels, out_channels, 1)
 
-        if fill_bias:
-            self.conv2.bias.data.fill_(bias_value)
+        if fill_bias != None:
+            self.conv2.bias.data.fill_(fill_bias)
         
     def forward(self, x):
         out = self.conv1(x)
@@ -181,7 +185,7 @@ class CenterNet(pl.LightningModule):
         num_classes: int, 
         other_heads: Iterable[str]=["size", "offset"], 
         loss_weights: Dict[str,float]=dict(size=0.1,offset=1),
-        heatmap_bias: float=-2.7,
+        heatmap_bias: float=None,
         max_pool_kernel: int=3,
         num_detections: int=40,
         batch_size: int=4, 
@@ -197,13 +201,13 @@ class CenterNet(pl.LightningModule):
         self.output_heads = nn.ModuleDict()
         self.output_heads["heatmap"] = OutputHead(
             feature_channels, num_classes, 
-            fill_bias=True, bias_value=heatmap_bias)
+            fill_bias=heatmap_bias)
         # other_heads excludes the compulsory heatmap head
         for h in other_heads:
             assert h in self.supported_heads
             self.output_heads[h] = OutputHead(
                 feature_channels, self.output_head_channels[h], 
-                fill_bias=True, bias_value=0)
+                fill_bias=0)
         self.other_heads = other_heads
 
         # loss weights are used to calculated total weighted loss
@@ -230,6 +234,7 @@ class CenterNet(pl.LightningModule):
 
         features = self.backbone(img)
         output = {}
+        output["backbone_features"] = features
         for k,v in self.output_heads.items():
             # k is head name, v is that head nn.Module
             output[k] = v(features)
@@ -416,6 +421,17 @@ class CenterNet(pl.LightningModule):
             self.logger.experiment.add_image(
                 "predicted heatmap scaled", pred_heatmap_scaled,
                 self.global_step, dataformats="chw")
+
+            # log backbone feature map
+            backbone_feature_map = encoded_output["backbone_features"][:num_samples]
+            backbone_feature_map = torch.mean(backbone_feature_map, dim=1)
+            backbone_feature_map = backbone_feature_map.cpu().numpy()
+            backbone_feature_map = cm(backbone_feature_map)[...,:3].transpose(0,3,1,2)
+            backbone_feature_map = torchvision.utils.make_grid(torch.from_numpy(backbone_feature_map), nrow=num_samples)
+            self.logger.experiment.add_image(
+                "backbone feature map", backbone_feature_map,
+                self.global_step, dataformats="chw"
+            )
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
