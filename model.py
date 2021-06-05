@@ -154,6 +154,7 @@ class ResNetBackbone(nn.Module):
 
         return nn.Sequential(*layers)
 
+# this is too trivial. may be make it a function under CenterNet?
 class OutputHead(nn.Module):
     """ Output head for CenterNet. Reference implementation https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py
     """
@@ -162,7 +163,7 @@ class OutputHead(nn.Module):
         fill_bias: float=None
         ):
         super(OutputHead, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)     # wrong implementation here. should be in_channels > in_channels
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(out_channels, out_channels, 1)
 
@@ -191,7 +192,7 @@ class CenterNet(pl.LightningModule):
         num_classes: int, 
         other_heads: Iterable[str]=["size", "offset"], 
         loss_weights: Dict[str,float]=dict(size=0.1,offset=1),
-        heatmap_bias: float=None,
+        heatmap_bias: float=-2.19,
         max_pool_kernel: int=3,
         num_detections: int=40,
         batch_size: int=4,
@@ -207,15 +208,17 @@ class CenterNet(pl.LightningModule):
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
         self.output_heads = nn.ModuleDict()
-        self.output_heads["heatmap"] = OutputHead(
-            feature_channels, num_classes, 
-            fill_bias=heatmap_bias)
+        # self.output_heads["heatmap"] = OutputHead(
+        #     feature_channels, num_classes, 
+        #     fill_bias=heatmap_bias)
+        self.output_heads["heatmap"] = self._make_output_head(feature_channels, num_classes, fill_bias=heatmap_bias)
         # other_heads excludes the compulsory heatmap head
         for h in other_heads:
             assert h in self.supported_heads
-            self.output_heads[h] = OutputHead(
-                feature_channels, self.output_head_channels[h], 
-                fill_bias=0)
+            # self.output_heads[h] = OutputHead(
+            #     feature_channels, self.output_head_channels[h], 
+            #     fill_bias=0)
+            self.output_heads[h] = self._make_output_head(feature_channels, self.output_head_channels[h], fill_bias=0)
         self.other_heads = other_heads
 
         # loss weights are used to calculated total weighted loss
@@ -238,6 +241,20 @@ class CenterNet(pl.LightningModule):
         # log hyperparameters
         self.save_hyperparameters({"backbone": backbone.__class__.__name__})
         self.save_hyperparameters("num_classes", "other_heads", "loss_weights", "heatmap_bias", "max_pool_kernel", "num_detections", "batch_size", "optimizer", "lr")      
+
+    def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float=None):
+        # Reference implementations
+        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
+        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
+        conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
+        relu = nn.ReLU()
+        conv2 = nn.Conv2d(in_channels, out_channels, 1)
+
+        if fill_bias != None:
+            conv2.bias.data.fill_(fill_bias)
+
+        output_head = nn.Sequential(conv1, relu, conv2)
+        return output_head
 
     def forward(self, batch):
         """Return a dictionary of feature maps for each output head. Use this output to either decode to predictions or compute loss.
