@@ -23,6 +23,25 @@ _resnet_mapper = {
     "resnet101": torchvision.models.resnet.resnet101
 }
 
+_resnet_out_channels = {
+    "resnet18": 512,
+    "resnet34": 512,
+    "resnet50": 2048,
+    "resnet101": 2048
+}
+
+_mobilenet_mapper = {
+    "mobilenetv2": torchvision.models.mobilenet.mobilenet_v2,
+    "mobilenetv3_small": torchvision.models.mobilenet.mobilenet_v3_small,
+    "mobilenetv3_large": torchvision.models.mobilenet.mobilenet_v3_large
+}
+
+_mobilenet_out_channels = {
+    "mobilenetv2": 1280,
+    "mobilenetv3_small": 576,
+    "mobilenetv3_large": 960
+}
+
 _optimizer_mapper = {
     "sgd": torch.optim.SGD,
     "adam": torch.optim.Adam,
@@ -41,6 +60,7 @@ class UpsampleBlock(nn.Module):
     # conv + deconv (centernet)
     # deconv + conv
     # upsampling + conv
+    # TODO: add support for depth-wise conv?
     def __init__(
         self, in_channels: int, out_channels: int, 
         deconv_kernel: int, deconv_stride: int=2,
@@ -63,6 +83,7 @@ class UpsampleBlock(nn.Module):
         self.deconv = nn.ConvTranspose2d(
             out_channels, out_channels, deconv_kernel, stride=deconv_stride,
             padding=deconv_pad, output_padding=deconv_out_pad, bias=False)
+        # self.deconv = nn.UpsamplingBilinear2d(scale_factor=2)
         self.bn_deconv = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU()
 
@@ -96,35 +117,67 @@ class UpsampleBlock(nn.Module):
         for c in range(1, w.size(0)):
             w[c,0,:,:] = w[0,0,:,:]
 
-class ResNetBackbone(nn.Module):
-    """Modified PoseNet from CenterNet https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
-
-    Original PoseNet https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
-    
-    TF implementations: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_feature_extractor.py
+class SimpleBackbone(nn.Module):
+    """ResNet/MobileNet with upsample stage (first proposed in PoseNet https://arxiv.org/abs/1804.06208)
     """
+    # Reference implementations
+    # CenterNet: https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
+    # Original: https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
+    # TensorFlow: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_re.py
+    
     def __init__(self, model: str="resnet50", pretrained: bool=True, upsample_init_bilinear: bool=True):
-        super(ResNetBackbone, self).__init__()
-        # downsampling path from resnet
-        backbone = _resnet_mapper[model](pretrained=pretrained)
-        self.downsample = nn.Sequential(
-            nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4
-        )
-        resnet_out_channels = 2048
+        super(SimpleBackbone, self).__init__()
         
+        # build downsample stage
+        if model in _resnet_mapper:
+            backbone = _resnet_mapper[model](pretrained=pretrained)
+            self.downsample = nn.Sequential(
+                nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
+                backbone.layer1,
+                backbone.layer2,
+                backbone.layer3,
+                backbone.layer4
+            )
+
+            num_channels = _resnet_out_channels[model]
+        
+        elif model in _mobilenet_mapper:
+            backbone = _mobilenet_mapper[model](pretrained=pretrained)
+            self.downsample = backbone.features
+
+            num_channels = _mobilenet_out_channels[model]
+
+        else:
+            raise ValueError(f"{model} not supported. Only resnet18/34/50/101 and mobilenetv2/v3 are supported")
+
         # upsampling parameters
         # NOTE: should these be included in constructor arguments?
         up_channels = [256, 128, 64]    # from CenterNet paper. original PoseNet uses [256,256,256]
         up_kernels = [4, 4, 4]          # from PoseNet paper
-        self.upsample = self._make_upsample_stage(
-            in_channels=resnet_out_channels, 
-            up_channels=up_channels, 
-            up_kernels=up_kernels,
-            init_bilinear=upsample_init_bilinear)
+        
+        # build upsample stage
+        upsample_layers = []
+        up_layer = UpsampleBlock(
+            num_channels, up_channels[0], deconv_kernel=up_kernels[0], 
+            init_bilinear=upsample_init_bilinear
+        )
+        upsample_layers.append(up_layer)
+
+        for i in range(len(up_channels)-1):
+            up_layer = UpsampleBlock(
+                up_channels[i], up_channels[i+1], deconv_kernel=up_kernels[i+1], 
+                init_bilinear=upsample_init_bilinear
+            )
+            upsample_layers.append(up_layer)
+
+        self.upsample = nn.Sequential(*upsample_layers)
+
+        # self.upsample = self._make_upsample_stage(
+        #     in_channels=num_channels, 
+        #     up_channels=up_channels, 
+        #     up_kernels=up_kernels,
+        #     conv_transpose=conv_transpose,
+        #     init_bilinear=upsample_init_bilinear)
         self.out_channels = up_channels[-1]
 
     def forward(self, x):
@@ -181,7 +234,7 @@ class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
     """
     supported_heads = ["size", "offset"]
-    output_head_channels ={
+    output_head_channels = {
         "size": 2,
         "offset": 2
     }
@@ -191,7 +244,7 @@ class CenterNet(pl.LightningModule):
         backbone: nn.Module, 
         num_classes: int, 
         other_heads: Iterable[str]=["size", "offset"], 
-        loss_weights: Dict[str,float]=dict(size=0.1,offset=1),
+        loss_weights: Dict[str,float]=dict(size=0.1, offset=1),
         heatmap_bias: float=-2.19,
         max_pool_kernel: int=3,
         num_detections: int=40,

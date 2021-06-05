@@ -10,7 +10,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from datasets import COCODataset, collate_detections_with_padding, prepare_coco_detection
-from model import ResNetBackbone, CenterNet
+from model import SimpleBackbone, CenterNet
 
 def get_train_augmentations(img_width=512, img_height=512):
     # from centernet paper
@@ -66,7 +66,7 @@ def train(config):
     loss_weights = config["MODEL"]["OUTPUT_HEADS"]["LOSS_WEIGHTS"]
     loss_weights = {k.lower(): v for k,v in loss_weights.items()}
 
-    backbone = ResNetBackbone(model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    backbone = SimpleBackbone(model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
         heatmap_bias=heatmap_bias, loss_weights=loss_weights,
