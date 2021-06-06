@@ -207,6 +207,79 @@ class SimpleBackbone(nn.Module):
 
         return nn.Sequential(*layers)
 
+def _make_fpn_layers(bottom_up_channels, top_down_channels):
+    """Return lateral projections (1x1 conv) and top down convolution (3x3 conv + bn + relu) for FPN network
+    """
+    lateral_projections = nn.ModuleList()
+    top_down_convs = nn.ModuleList()
+
+    for bottom_up_dim, top_down_dim in zip(bottom_up_channels, top_down_channels):
+        # 1x1 conv to match number of channels
+        if bottom_up_dim == top_down_dim:
+            lateral_conv = nn.Identity()
+        else:
+            lateral_conv = nn.Conv2d(bottom_up_dim, top_down_dim, kernel_size=1, stride=1)
+        
+        output_conv = nn.Sequential(
+            nn.Conv2d(top_down_dim, top_down_dim, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(top_down_dim),
+            nn.ReLU()
+        )
+
+        lateral_projections.append(lateral_conv)
+        top_down_convs.append(output_conv)
+
+    return lateral_projections, top_down_convs
+
+class ResNetFPNBackbone(nn.Module):
+    """
+    """
+    # https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_v1_fpn_feature_extractor.py
+    def __init__(
+        self, 
+        model: str="resnet50", 
+        pretrained: bool=True, 
+        ):
+        super(SimpleBackbone, self).__init__()
+
+        # bottom up path from resnet
+        backbone = _resnet_mapper[model](pretrained=pretrained)
+        self.bottom_up = nn.ModuleList([
+            nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
+            backbone.layer1,
+            backbone.layer2,
+            backbone.layer3,
+            backbone.layer4
+        ])
+    
+        resnet_channels = [2048, 1024, 512]
+        top_down_channels = [256, 128, 64]    
+        self.lateral_projections, self.top_down_convs = _make_fpn_layers(resnet_channels, top_down_channels)
+
+        self.out_channels = top_down_channels[-1]
+
+    def forward(self, x):
+        # bottom up path. save feature maps in a list for lateral connections later
+        bottom_up_features = [self.bottom_up[0](x)]
+
+        for i in range(1, len(self.bottom_up)):
+            next_feature = self.bottom_up[i](bottom_up_features[-1])
+            bottom_up_features.append(next_feature)
+
+        # feature at pyramid top
+        out = self.lateral_projections[0](bottom_up_features[-1])
+        out = self.top_down_convs[0](out)
+
+        # top down path
+        for i in range(1, len(self.lateral_projections)):
+            out = F.interpolate(out, scale_factor=2, mode="nearest")            # scale up
+            lateral = self.lateral_projections[i](bottom_up_features[-i-1])     # lateral skip connection
+            
+            out = out + lateral                 # merge
+            out = self.top_down_convs[i](out)   # conv block
+
+        return out
+
 # this is too trivial. may be make it a function under CenterNet?
 class OutputHead(nn.Module):
     """ Output head for CenterNet. Reference implementation https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py
