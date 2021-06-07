@@ -26,9 +26,9 @@ _resnet_channels = {
 }
 
 _mobilenet_channels = {
-    "mobilenet_v2": [1280],
-    "mobilenet_v3_small": [576],
-    "mobilenet_v3_large": [960]
+    "mobilenet_v2": [16, 24, 32, 96, 1280],
+    "mobilenet_v3_small": [16, 16, 24, 48, 576],
+    "mobilenet_v3_large": [16, 24, 40, 112, 960]
 }
 
 _optimizer_mapper = {
@@ -174,34 +174,48 @@ def simple_mobilenet_backbone(mobilenet_name, pretrained=True, upsample_init_bil
 class FPNBackbone(nn.Module):
     """
     """
-    # https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_v1_fpn_feature_extractor.py
+    # Reference implementation: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_v1_fpn_feature_extractor.py
+    # Note that this is different from the original FPN
+    # 1. this only uses the last feature map from FPN
+    # 2. top down path uses different number of channels, thus a conv layer is required after merging with lateral skip connection
     def __init__(
         self, 
         bottom_up: nn.ModuleList,
         bottom_up_channels: Iterable[int],
         top_down_channels: Iterable[int]=[256, 128, 64]
         ):
-        super(SimpleBackbone, self).__init__()
+        """
+            bottom_up_channels list from bottom to top (forward pass of the backbone)
+            top_down_channels list from top to bottom (forward pass of the FPN)
+        """
+        super(FPNBackbone, self).__init__()
         self.bottom_up = bottom_up
         
-        lateral_projections = nn.ModuleList()
-        top_down_convs = nn.ModuleList()
+        self.lateral_projections = nn.ModuleList()
+        self.top_down_convs = nn.ModuleList()
 
-        for bottom_up_dim, top_down_dim in zip(bottom_up_channels, top_down_channels):
+        for i in range(len(top_down_channels)):
+            in_channels = bottom_up_channels[-1-i]
+            out_channels = top_down_channels[i]
+
             # 1x1 conv to match number of channels
-            if bottom_up_dim == top_down_dim:
+            if in_channels == out_channels:
                 lateral_conv = nn.Identity()
             else:
-                lateral_conv = nn.Conv2d(bottom_up_dim, top_down_dim, kernel_size=1, stride=1)
+                lateral_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)
             
+            if i == len(top_down_channels) - 1:
+                next_channels = top_down_channels[-1]
+            else:
+                next_channels = top_down_channels[i+1]
             output_conv = nn.Sequential(
-                nn.Conv2d(top_down_dim, top_down_dim, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(top_down_dim),
+                nn.Conv2d(out_channels, next_channels, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(next_channels),
                 nn.ReLU()
             )
 
-            lateral_projections.append(lateral_conv)
-            top_down_convs.append(output_conv)
+            self.lateral_projections.append(lateral_conv)
+            self.top_down_convs.append(output_conv)
 
         self.out_channels = top_down_channels[-1]
 
@@ -236,18 +250,30 @@ def fpn_resnet_backbone(resnet_name, pretrained=True):
         backbone.layer3,
         backbone.layer4
     ])
-    bottom_up_channels = _resnet_channels[resnet_name][::-1]    # reverse the list so it's top down order
+    bottom_up_channels = _resnet_channels[resnet_name]
 
     return FPNBackbone(bottom_up, bottom_up_channels)
 
 
 def fpn_mobilenet_backbone(mobilenet_name, pretrained=True):
-    # WIP
+    # conv with stride = 2 (downsample) will be the first layer of each stage
+    # this is to ensure that at each stage, it is the most refined feature map at that re
+    # https://github.com/pytorch/vision/blob/master/torchvision/models/detection/backbone_utils.py
     backbone = mobilenet.__dict__[mobilenet_name](pretrained=pretrained)
-    bottom_up = nn.ModuleList([
-        backbone.features,
-    ])
-    bottom_up_channels = _mobilenet_channels[mobilenet_name][::-1]
+    features = backbone.features
+    bottom_up = nn.ModuleList()
+
+    stage = [features[0]]
+    for i in range(1, len(features)-1):
+        if features[i]._is_cn:      # stride = 2, start of a new stage
+            bottom_up.append(nn.Sequential(*stage))
+            stage = [features[i]]
+        else:
+            stage.append(features[i])
+    stage.append(features[-1])      # include last conv layer in the last stage
+    bottom_up.append(nn.Sequential(*stage))
+    
+    bottom_up_channels = _mobilenet_channels[mobilenet_name]
 
     return FPNBackbone(bottom_up, bottom_up_channels)
 
