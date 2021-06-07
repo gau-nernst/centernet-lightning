@@ -172,12 +172,6 @@ class SimpleBackbone(nn.Module):
 
         self.upsample = nn.Sequential(*upsample_layers)
 
-        # self.upsample = self._make_upsample_stage(
-        #     in_channels=num_channels, 
-        #     up_channels=up_channels, 
-        #     up_kernels=up_kernels,
-        #     conv_transpose=conv_transpose,
-        #     init_bilinear=upsample_init_bilinear)
         self.out_channels = up_channels[-1]
 
     def forward(self, x):
@@ -280,29 +274,6 @@ class ResNetFPNBackbone(nn.Module):
 
         return out
 
-# this is too trivial. may be make it a function under CenterNet?
-class OutputHead(nn.Module):
-    """ Output head for CenterNet. Reference implementation https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py
-    """
-    def __init__(
-        self, in_channels: int, out_channels: int, 
-        fill_bias: float=None
-        ):
-        super(OutputHead, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)     # wrong implementation here. should be in_channels > in_channels
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 1)
-
-        if fill_bias != None:
-            self.conv2.bias.data.fill_(fill_bias)
-        
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.relu(out)
-        out = self.conv2(out)
-
-        return out
-
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
     """
@@ -334,16 +305,10 @@ class CenterNet(pl.LightningModule):
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
         self.output_heads = nn.ModuleDict()
-        # self.output_heads["heatmap"] = OutputHead(
-        #     feature_channels, num_classes, 
-        #     fill_bias=heatmap_bias)
         self.output_heads["heatmap"] = self._make_output_head(feature_channels, num_classes, fill_bias=heatmap_bias)
-        # other_heads excludes the compulsory heatmap head
+
         for h in other_heads:
             assert h in self.supported_heads
-            # self.output_heads[h] = OutputHead(
-            #     feature_channels, self.output_head_channels[h], 
-            #     fill_bias=0)
             self.output_heads[h] = self._make_output_head(feature_channels, self.output_head_channels[h], fill_bias=0)
         self.other_heads = other_heads
 
@@ -363,10 +328,6 @@ class CenterNet(pl.LightningModule):
         # for pytorch lightning tuner
         self.batch_size = batch_size
         self.learning_rate = lr
-
-        # log hyperparameters
-        self.save_hyperparameters({"backbone": backbone.__class__.__name__})
-        self.save_hyperparameters("num_classes", "other_heads", "loss_weights", "heatmap_bias", "max_pool_kernel", "num_detections", "batch_size", "optimizer", "lr")      
 
     def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float=None):
         # Reference implementations
@@ -520,8 +481,8 @@ class CenterNet(pl.LightningModule):
             total_loss += losses[h] * self.loss_weights[h]
 
         for k,v in losses.items():
-            self.log(f"train_{k}_loss", v)
-        self.log("train_total_loss", total_loss)
+            self.log(f"train/{k}_loss", v)
+        self.log("train/total_loss", total_loss)
 
         return total_loss
 
@@ -534,59 +495,20 @@ class CenterNet(pl.LightningModule):
             total_loss += losses[h] * self.loss_weights[h]
 
         for k,v in losses.items():
-            self.log(f"val_{k}_loss", v)
-        self.log("val_total_loss", total_loss)
+            self.log(f"val/{k}_loss", v)
+        self.log("val/total_loss", total_loss)
 
         pred_detections = self.decode_detections(encoded_output, num_detections=10)
         ap50, ar50 = self.evaluate_batch(pred_detections, batch)
-        self.log("val_ap50", ap50)
-        self.log("val_ar50", ar50)
-        
-        # only log sample images for the first validation batch
-        if batch_idx == 0:
-            imgs = batch["image"]
-            num_samples = 8
+        self.log("val/ap50", ap50)
+        self.log("val/ar50", ar50)
 
-            # draw bounding boxes on val images
-            sample_imgs = self.draw_sample_images(imgs, pred_detections, batch, N_samples=num_samples)
-            sample_imgs = sample_imgs.transpose(0,3,1,2)            # NHWC to NCHW
-            sample_imgs = torchvision.utils.make_grid(torch.from_numpy(sample_imgs), nrow=num_samples)
-            
-            self.logger.experiment.add_image(
-                "validation images", sample_imgs, 
-                self.global_step, dataformats="chw")
-
-            # log output heatmap
-            pred_heatmap = torch.sigmoid(encoded_output["heatmap"][:num_samples])     # convert to probability
-            pred_heatmap, _ = torch.max(pred_heatmap, dim=1)            # aggregate heatmaps across classes/channels
-            pred_heatmap = pred_heatmap.cpu().numpy()
-            pred_heatmap_scaled = pred_heatmap / np.max(pred_heatmap)   # scaled to [0,1]
-            
-            cm = plt.get_cmap("viridis")        # apply color map
-            pred_heatmap = cm(pred_heatmap)[...,:3].transpose(0,3,1,2)      # NHWC to NCHW
-            pred_heatmap_scaled = cm(pred_heatmap_scaled)[...,:3].transpose(0,3,1,2)
-
-            pred_heatmap = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap), nrow=num_samples)
-            pred_heatmap_scaled = torchvision.utils.make_grid(torch.from_numpy(pred_heatmap_scaled), nrow=num_samples)
-
-            self.logger.experiment.add_image(
-                "predicted heatmap", pred_heatmap,
-                self.global_step, dataformats="chw")
-            
-            self.logger.experiment.add_image(
-                "predicted heatmap scaled", pred_heatmap_scaled,
-                self.global_step, dataformats="chw")
-
-            # log backbone feature map
-            backbone_feature_map = encoded_output["backbone_features"][:num_samples]
-            backbone_feature_map = torch.mean(backbone_feature_map, dim=1)
-            backbone_feature_map = backbone_feature_map.cpu().numpy()
-            backbone_feature_map = cm(backbone_feature_map)[...,:3].transpose(0,3,1,2)
-            backbone_feature_map = torchvision.utils.make_grid(torch.from_numpy(backbone_feature_map), nrow=num_samples)
-            self.logger.experiment.add_image(
-                "backbone feature map", backbone_feature_map,
-                self.global_step, dataformats="chw"
-            )
+        # return these for logging image callback
+        result = {
+            "detections": pred_detections,
+            "encoded_output": encoded_output
+        }
+        return result
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
@@ -615,10 +537,11 @@ class CenterNet(pl.LightningModule):
         self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], 
         targets: Dict[str, torch.Tensor], N_samples: int=8
         ):
-        indices = torch.arange(min(imgs.shape[0], N_samples))
-        
-        samples = imgs[indices].cpu().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
-        samples = np.ascontiguousarray(samples[:,::2,::2,:])        # fast downsample via resampling  
+        N_samples = min(imgs.shape[0], N_samples)
+
+        samples = imgs[:N_samples].cpu().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
+        samples = np.ascontiguousarray(samples)     # C-contiguous, for opencv
+        # samples = np.ascontiguousarray(samples[:,::2,::2,:])        # fast downsample via resampling  
 
         target_bboxes = targets["bboxes"].cpu().numpy()
         convert_cxcywh_to_x1y1x2y2(target_bboxes)
@@ -629,13 +552,13 @@ class CenterNet(pl.LightningModule):
         pred_labels = preds["labels"].cpu().numpy().astype(int)
         pred_scores = preds["scores"].cpu().numpy()
 
-        for i, idx in enumerate(indices):
+        for i in range(N_samples):
             draw_bboxes(
-                samples[i], pred_bboxes[idx], pred_labels[idx], pred_scores[idx], 
+                samples[i], pred_bboxes[i], pred_labels[i], pred_scores[i], 
                 inplace=True, relative_scale=True, color=RED)
     
             draw_bboxes(
-                samples[i], target_bboxes[idx], target_labels[idx], 
+                samples[i], target_bboxes[i], target_labels[i], 
                 inplace=True, relative_scale=True, color=BLUE)
 
         return samples

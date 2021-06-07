@@ -3,8 +3,11 @@ import yaml
 
 import torch
 from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
 
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+import wandb
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -30,7 +33,71 @@ def get_train_augmentations(img_width=512, img_height=512):
     
     return train_augmentations
 
-def train(config):
+def apply_mpl_cmap(input: torch.Tensor, cmap: str, return_tensor=False, channel_first=False):
+    """input is 1-channel image with dimension NHW (no channel dimension)
+    """
+    cm = plt.get_cmap(cmap)
+    output = cm(input.numpy())[...,:3]  # apply cmap and remove alpha channel
+
+    if channel_first:
+        output = output.transpose(0,3,1,2)  # NHWC to NCHW
+    if return_tensor:
+        output = torch.from_numpy(output)
+    return output
+
+class LogImageCallback(pl.Callback):
+    
+    def __init__(self, use_wandb=False):
+        self.use_wandb = use_wandb
+
+    def on_validation_batch_end(self, trainer, pl_module: CenterNet, outputs, batch, batch_idx, dataloader_idx):
+        if batch_idx == 0:
+            pred_detections = outputs["detections"]
+            encoded_output = outputs["encoded_output"]
+
+            # only log sample images for the first validation batch
+            imgs = batch["image"]
+            num_samples = 8
+            cmap = "viridis"
+
+            # draw bounding boxes on val images
+            sample_imgs = pl_module.draw_sample_images(imgs, pred_detections, batch, N_samples=num_samples)
+            
+            # log output heatmap
+            pred_heatmap = encoded_output["heatmap"][:num_samples].cpu()
+            pred_heatmap = torch.sigmoid(pred_heatmap)                      # convert to probability
+            pred_heatmap, _ = torch.max(pred_heatmap, dim=1)                # aggregate heatmaps across classes/channels
+            pred_heatmap_scaled = pred_heatmap / torch.max(pred_heatmap)    # scale to [0,1]
+
+            pred_heatmap = apply_mpl_cmap(pred_heatmap, cmap)
+            pred_heatmap_scaled = apply_mpl_cmap(pred_heatmap_scaled, cmap)
+
+            # log backbone feature map
+            backbone_feature_map = encoded_output["backbone_features"][:num_samples].cpu()
+            backbone_feature_map = torch.mean(backbone_feature_map, dim=1)      # mean aggregate
+            backbone_feature_map = apply_mpl_cmap(backbone_feature_map, cmap)
+            
+            log_images = {
+                "output detections": sample_imgs,
+                "predicted heatmap": pred_heatmap,
+                "predicted heatmap scaled": pred_heatmap_scaled,
+                "backbone feature map": backbone_feature_map
+            }
+            
+            for img_name, imgs in log_images.items():
+                if self.use_wandb:  # log using wandb
+                    trainer.logger.experiment.log({
+                        f"val/{img_name}": [wandb.Image(img) for img in imgs],
+                        "global_step": trainer.global_step
+                    })
+                
+                else:               # log using tensorboard
+                    trainer.logger.experiment.add_images(
+                        f"val/{img_name}", imgs, 
+                        trainer.global_step, dataformats="nhwc")
+
+
+def train(config, use_wandb=False):
     # training hyperparameters
     num_epochs = config["TRAINER"]["EPOCHS"]
     batch_size = config["TRAINER"]["BATCH_SIZE"]
@@ -66,26 +133,54 @@ def train(config):
     loss_weights = config["MODEL"]["OUTPUT_HEADS"]["LOSS_WEIGHTS"]
     loss_weights = {k.lower(): v for k,v in loss_weights.items()}
 
-    backbone = SimpleBackbone(model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    # build model
+    backbone = SimpleBackbone(
+        model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
         heatmap_bias=heatmap_bias, loss_weights=loss_weights,
         batch_size=batch_size, optimizer=optimizer, lr=lr)
     
+    if use_wandb:
+        logger = WandbLogger(project="CenterNet")
+        logger.watch(model)
+    else:
+        logger = TensorBoardLogger("tb_logs")
+    
+    logger.log_hyperparams({
+        "backbone architecture": backbone_archi,
+        "upsample init bilinear": upsample_init,
+        "heatmap bias": heatmap_bias,
+        "size loss weight": loss_weights["size"],
+        "offset loss weight": loss_weights["offset"],
+        "batch size": batch_size,
+        "optimizer": optimizer,
+        "learning rate": lr
+    })
+
     trainer = pl.Trainer(
-        gpus=1, 
+        gpus=1,
         # max_epochs=num_epochs,
         max_steps=500,              # train for 500 steps  
         limit_val_batches=20,       # only run validation on 20 batches
         val_check_interval=100,     # run validation every 100 steps
+        logger=logger,
+        callbacks=[LogImageCallback(use_wandb)]
     )
     
     trainer.fit(model, train_dataloader, val_dataloader)
 
 if __name__ == "__main__":
+    use_wandb = True
+
+    if use_wandb:
+        # read wandb API key from file
+        with open(".wandb_key", "r", encoding="utf-8") as f:
+            os.environ["WANDB_API_KEY"] = f.readline().rstrip()
+        
     # load config from yaml file
     config_file = os.path.join("configs", "coco_resnet50.yaml")
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    train(config)
+    train(config, use_wandb=use_wandb)
