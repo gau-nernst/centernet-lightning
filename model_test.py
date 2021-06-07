@@ -2,7 +2,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-from model import SimpleBackbone, CenterNet
+from model import CenterNet, simple_resnet_backbone, simple_mobilenet_backbone
 from datasets import COCODataset, collate_detections_with_padding
 from train import get_train_augmentations
 from losses import render_target_heatmap
@@ -20,17 +20,15 @@ class TestModels:
 
     def test_resnet_backbone(self):
         for resnet in ["resnet18", "resnet34", "resnet50", "resnet101"]:
-            print("Testing", resnet)
-            backbone = SimpleBackbone(resnet)
+            backbone = simple_resnet_backbone(resnet)
             sample_input = torch.rand((4,3,self.INPUT_SIZE,self.INPUT_SIZE))
             sample_output = backbone(sample_input)
 
             assert sample_output.shape == (4,64,self.OUTPUT_SIZE,self.OUTPUT_SIZE)  # output dimension
 
     def test_mobilenet_backbone(self):
-        for mobilenet in ["mobilenetv2", "mobilenetv3_small", "mobilenetv3_large"]:
-            print("Testing", mobilenet)
-            backbone = SimpleBackbone(mobilenet)
+        for mobilenet in ["mobilenet_v2", "mobilenet_v3_small", "mobilenet_v3_large"]:
+            backbone = simple_mobilenet_backbone(mobilenet)
             sample_input = torch.rand((4,3,self.INPUT_SIZE,self.INPUT_SIZE))
             sample_output = backbone(sample_input)
 
@@ -39,7 +37,7 @@ class TestModels:
     def test_forward_pass(self):
         batch = next(iter(coco_dataloader))
 
-        backbone = SimpleBackbone()
+        backbone = simple_resnet_backbone("resnet50")
         model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
         
         sample_output = model(batch)
@@ -59,7 +57,7 @@ class TestModels:
     def test_compute_loss(self):
         batch = next(iter(coco_dataloader))
 
-        backbone = SimpleBackbone()
+        backbone = simple_resnet_backbone("resnet50")
         model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
 
         output_maps = model(batch)
@@ -72,7 +70,7 @@ class TestModels:
 
     def test_trainer(self):
         # make sure pytorch lightning trainer can run
-        backbone = SimpleBackbone()
+        backbone = simple_resnet_backbone("resnet50")
         model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
         
         gpus = 1 if torch.cuda.is_available() else 0
@@ -101,7 +99,7 @@ class TestModels:
             "size": size,
             "offset": offset
         }
-        backbone = SimpleBackbone()
+        backbone = simple_resnet_backbone("resnet50")
         model = CenterNet(backbone=backbone, num_classes=ds.num_classes, batch_size=4)
         
         output = model.decode_detections(sample_input)

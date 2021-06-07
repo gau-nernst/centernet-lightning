@@ -5,6 +5,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision
+import torchvision.models.resnet as resnet
+import torchvision.models.mobilenet as mobilenet
 import pytorch_lightning as pl
 
 import math
@@ -16,30 +18,17 @@ from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import eval_detections
 from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes, draw_heatmap
 
-_resnet_mapper = {
-    "resnet18": torchvision.models.resnet.resnet18,
-    "resnet34": torchvision.models.resnet.resnet34,
-    "resnet50": torchvision.models.resnet.resnet50, 
-    "resnet101": torchvision.models.resnet.resnet101
+_resnet_channels = {
+    "resnet18": [64, 128, 256, 512],
+    "resnet34": [64, 128, 256, 512],
+    "resnet50": [256, 512, 1024, 2048],
+    "resnet101": [256, 512, 1024, 2048]
 }
 
-_resnet_out_channels = {
-    "resnet18": 512,
-    "resnet34": 512,
-    "resnet50": 2048,
-    "resnet101": 2048
-}
-
-_mobilenet_mapper = {
-    "mobilenetv2": torchvision.models.mobilenet.mobilenet_v2,
-    "mobilenetv3_small": torchvision.models.mobilenet.mobilenet_v3_small,
-    "mobilenetv3_large": torchvision.models.mobilenet.mobilenet_v3_large
-}
-
-_mobilenet_out_channels = {
-    "mobilenetv2": 1280,
-    "mobilenetv3_small": 576,
-    "mobilenetv3_large": 960
+_mobilenet_channels = {
+    "mobilenet_v2": [1280],
+    "mobilenet_v3_small": [576],
+    "mobilenet_v3_large": [960]
 }
 
 _optimizer_mapper = {
@@ -124,55 +113,37 @@ class SimpleBackbone(nn.Module):
     # CenterNet: https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
     # Original: https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
     # TensorFlow: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_re.py
-    
-    def __init__(self, model: str="resnet50", pretrained: bool=True, upsample_init_bilinear: bool=True):
+    # upsample parameters (channels and kernels) are from CenterNet
+
+    def __init__(
+        self, 
+        downsample: nn.Module, 
+        downsample_out_channels: int, 
+        upsample_channels=[256, 128, 64],
+        upsample_kernels=[4, 4, 4],
+        upsample_init_bilinear: bool=True
+        ):
         super(SimpleBackbone, self).__init__()
-        
-        # build downsample stage
-        if model in _resnet_mapper:
-            backbone = _resnet_mapper[model](pretrained=pretrained)
-            self.downsample = nn.Sequential(
-                nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
-                backbone.layer1,
-                backbone.layer2,
-                backbone.layer3,
-                backbone.layer4
-            )
+        self.downsample = downsample
 
-            num_channels = _resnet_out_channels[model]
-        
-        elif model in _mobilenet_mapper:
-            backbone = _mobilenet_mapper[model](pretrained=pretrained)
-            self.downsample = backbone.features
-
-            num_channels = _mobilenet_out_channels[model]
-
-        else:
-            raise ValueError(f"{model} not supported. Only resnet18/34/50/101 and mobilenetv2/v3 are supported")
-
-        # upsampling parameters
-        # NOTE: should these be included in constructor arguments?
-        up_channels = [256, 128, 64]    # from CenterNet paper. original PoseNet uses [256,256,256]
-        up_kernels = [4, 4, 4]          # from PoseNet paper
-        
         # build upsample stage
         upsample_layers = []
         up_layer = UpsampleBlock(
-            num_channels, up_channels[0], deconv_kernel=up_kernels[0], 
-            init_bilinear=upsample_init_bilinear
+            downsample_out_channels, upsample_channels[0],
+            deconv_kernel=upsample_kernels[0], init_bilinear=upsample_init_bilinear
         )
         upsample_layers.append(up_layer)
 
-        for i in range(len(up_channels)-1):
+        for i in range(len(upsample_channels)-1):
             up_layer = UpsampleBlock(
-                up_channels[i], up_channels[i+1], deconv_kernel=up_kernels[i+1], 
+                upsample_channels[i], upsample_channels[i+1], deconv_kernel=upsample_kernels[i+1], 
                 init_bilinear=upsample_init_bilinear
             )
             upsample_layers.append(up_layer)
 
         self.upsample = nn.Sequential(*upsample_layers)
 
-        self.out_channels = up_channels[-1]
+        self.out_channels = upsample_channels[-1]
 
     def forward(self, x):
         out = self.downsample(x)
@@ -180,75 +151,57 @@ class SimpleBackbone(nn.Module):
 
         return out
 
-    def _make_upsample_stage(
-        self,
-        in_channels: int, 
-        up_channels: List[int],
-        up_kernels: List[int],
-        init_bilinear: bool=True
-        ):
-        layers = []
-        layers.append(UpsampleBlock(
-            in_channels, up_channels[0], deconv_kernel=up_kernels[0], 
-            init_bilinear=init_bilinear
-        ))
+def simple_resnet_backbone(resnet_name, pretrained=True, upsample_init_bilinear=True):
+    backbone = resnet.__dict__[resnet_name](pretrained=pretrained)
+    downsample = nn.Sequential(
+        nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
+        backbone.layer1,
+        backbone.layer2,
+        backbone.layer3,
+        backbone.layer4
+    )
+    last_channels = _resnet_channels[resnet_name][-1]
 
-        for i in range(len(up_channels)-1):
-            layers.append(UpsampleBlock(
-                up_channels[i], up_channels[i+1], deconv_kernel=up_kernels[i+1], 
-                init_bilinear=init_bilinear
-            ))
+    return SimpleBackbone(downsample, last_channels, upsample_init_bilinear=upsample_init_bilinear)
 
-        return nn.Sequential(*layers)
+def simple_mobilenet_backbone(mobilenet_name, pretrained=True, upsample_init_bilinear=True):
+    backbone = mobilenet.__dict__[mobilenet_name](pretrained=pretrained)
+    downsample = backbone.features
+    last_channels = _mobilenet_channels[mobilenet_name][-1]
 
-def _make_fpn_layers(bottom_up_channels, top_down_channels):
-    """Return lateral projections (1x1 conv) and top down convolution (3x3 conv + bn + relu) for FPN network
-    """
-    lateral_projections = nn.ModuleList()
-    top_down_convs = nn.ModuleList()
+    return SimpleBackbone(downsample, last_channels, upsample_init_bilinear=upsample_init_bilinear)
 
-    for bottom_up_dim, top_down_dim in zip(bottom_up_channels, top_down_channels):
-        # 1x1 conv to match number of channels
-        if bottom_up_dim == top_down_dim:
-            lateral_conv = nn.Identity()
-        else:
-            lateral_conv = nn.Conv2d(bottom_up_dim, top_down_dim, kernel_size=1, stride=1)
-        
-        output_conv = nn.Sequential(
-            nn.Conv2d(top_down_dim, top_down_dim, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(top_down_dim),
-            nn.ReLU()
-        )
-
-        lateral_projections.append(lateral_conv)
-        top_down_convs.append(output_conv)
-
-    return lateral_projections, top_down_convs
-
-class ResNetFPNBackbone(nn.Module):
+class FPNBackbone(nn.Module):
     """
     """
     # https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_v1_fpn_feature_extractor.py
     def __init__(
         self, 
-        model: str="resnet50", 
-        pretrained: bool=True, 
+        bottom_up: nn.ModuleList,
+        bottom_up_channels: Iterable[int],
+        top_down_channels: Iterable[int]=[256, 128, 64]
         ):
         super(SimpleBackbone, self).__init__()
+        self.bottom_up = bottom_up
+        
+        lateral_projections = nn.ModuleList()
+        top_down_convs = nn.ModuleList()
 
-        # bottom up path from resnet
-        backbone = _resnet_mapper[model](pretrained=pretrained)
-        self.bottom_up = nn.ModuleList([
-            nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
-            backbone.layer1,
-            backbone.layer2,
-            backbone.layer3,
-            backbone.layer4
-        ])
-    
-        resnet_channels = [2048, 1024, 512]
-        top_down_channels = [256, 128, 64]    
-        self.lateral_projections, self.top_down_convs = _make_fpn_layers(resnet_channels, top_down_channels)
+        for bottom_up_dim, top_down_dim in zip(bottom_up_channels, top_down_channels):
+            # 1x1 conv to match number of channels
+            if bottom_up_dim == top_down_dim:
+                lateral_conv = nn.Identity()
+            else:
+                lateral_conv = nn.Conv2d(bottom_up_dim, top_down_dim, kernel_size=1, stride=1)
+            
+            output_conv = nn.Sequential(
+                nn.Conv2d(top_down_dim, top_down_dim, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(top_down_dim),
+                nn.ReLU()
+            )
+
+            lateral_projections.append(lateral_conv)
+            top_down_convs.append(output_conv)
 
         self.out_channels = top_down_channels[-1]
 
@@ -273,6 +226,30 @@ class ResNetFPNBackbone(nn.Module):
             out = self.top_down_convs[i](out)   # conv block
 
         return out
+
+def fpn_resnet_backbone(resnet_name, pretrained=True):
+    backbone = resnet.__dict__[resnet_name](pretrained=pretrained)
+    bottom_up = nn.ModuleList([
+        nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
+        backbone.layer1,
+        backbone.layer2,
+        backbone.layer3,
+        backbone.layer4
+    ])
+    bottom_up_channels = _resnet_channels[resnet_name][::-1]    # reverse the list so it's top down order
+
+    return FPNBackbone(bottom_up, bottom_up_channels)
+
+
+def fpn_mobilenet_backbone(mobilenet_name, pretrained=True):
+    # WIP
+    backbone = mobilenet.__dict__[mobilenet_name](pretrained=pretrained)
+    bottom_up = nn.ModuleList([
+        backbone.features,
+    ])
+    bottom_up_channels = _mobilenet_channels[mobilenet_name][::-1]
+
+    return FPNBackbone(bottom_up, bottom_up_channels)
 
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output

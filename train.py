@@ -13,7 +13,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from datasets import COCODataset, collate_detections_with_padding, prepare_coco_detection
-from model import SimpleBackbone, CenterNet
+from model import simple_mobilenet_backbone, simple_resnet_backbone, CenterNet
 
 def get_train_augmentations(img_width=512, img_height=512):
     # from centernet paper
@@ -126,6 +126,7 @@ def train(config, use_wandb=False):
         batch_size=batch_size, num_workers=4, pin_memory=True)
 
     # set up pytorch lightning model and trainer
+    backbone_family = config["MODEL"]["BACKBONE"]["FAMILY"]
     backbone_archi = config["MODEL"]["BACKBONE"]["ARCHITECTURE"]
     upsample_init = config["MODEL"]["BACKBONE"]["UPSAMPLE_INIT_BILINEAR"]
     other_heads = config["MODEL"]["OUTPUT_HEADS"]["OTHER_HEADS"]
@@ -134,8 +135,15 @@ def train(config, use_wandb=False):
     loss_weights = {k.lower(): v for k,v in loss_weights.items()}
 
     # build model
-    backbone = SimpleBackbone(
-        model=backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    if backbone_family == "resnet":
+        backbone = simple_resnet_backbone(
+            backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    elif backbone_family == "mobilenet":
+        backbone = simple_mobilenet_backbone(
+            backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    else:
+        raise ValueError(f"{backbone_family} not supported")
+    
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
         heatmap_bias=heatmap_bias, loss_weights=loss_weights,
