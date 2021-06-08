@@ -47,14 +47,17 @@ def apply_mpl_cmap(input: torch.Tensor, cmap: str, return_tensor=False, channel_
 
 class LogImageCallback(pl.Callback):
     
-    def __init__(self, use_wandb=False, num_samples=8):
+    def __init__(self, use_wandb=False, num_samples=8, num_bboxes=10):
         self.use_wandb = use_wandb
         self.num_samples = num_samples
+        self.num_bboxes = num_bboxes
 
     def on_validation_batch_end(self, trainer, pl_module: CenterNet, outputs, batch, batch_idx, dataloader_idx):
         if batch_idx == 0:
             pred_detections = outputs["detections"]
             encoded_output = outputs["encoded_output"]
+
+            pred_detections = {k: v[:,:self.num_bboxes] for k,v in pred_detections.items()}
 
             # only log sample images for the first validation batch
             imgs = batch["image"]
@@ -158,27 +161,27 @@ def train(config, run_name=None, use_wandb=False):
         batch_size=batch_size, optimizer=optimizer, lr=lr)
     
     if use_wandb:
-        logger = WandbLogger(project="CenterNet", name=run_name)
+        logger = WandbLogger(project="CenterNet", name=run_name, log_model=True)
         logger.watch(model)
     else:
         logger = TensorBoardLogger("tb_logs", name=run_name)
     
     logger.log_hyperparams({
-        "backbone architecture": backbone_archi,
-        "upsample init bilinear": upsample_init,
-        "heatmap bias": heatmap_bias,
-        "size loss weight": loss_weights["size"],
-        "offset loss weight": loss_weights["offset"],
-        "batch size": batch_size,
+        "backbone_architecture": backbone_archi,
+        "upsample_init_bilinear": upsample_init,
+        "heatmap_bias": heatmap_bias,
+        "size_loss_weight": loss_weights["size"],
+        "offset_loss_weight": loss_weights["offset"],
+        "batch_size": batch_size,
         "optimizer": optimizer,
-        "learning rate": lr
+        "learning_rate": lr
     })
 
     trainer = pl.Trainer(
         gpus=1,
         max_epochs=num_epochs,
         # max_steps=500,              # train for 500 steps  
-        # limit_val_batches=20,       # only run validation on 20 batches
+        limit_val_batches=50,       # only run validation on 20 batches
         val_check_interval=1000,     # run validation every 100 steps
         logger=logger,
         callbacks=[LogImageCallback(use_wandb, 16)]
@@ -187,7 +190,7 @@ def train(config, run_name=None, use_wandb=False):
     trainer.fit(model, train_dataloader, val_dataloader)
 
 if __name__ == "__main__":
-    run_name = "coco_resnet50"
+    run_name = "coco_resnet34_1epoch_test"
     use_wandb = True
 
     if use_wandb:
@@ -196,7 +199,7 @@ if __name__ == "__main__":
             os.environ["WANDB_API_KEY"] = f.readline().rstrip()
         
     # load config from yaml file
-    config_file = os.path.join("configs", "coco_resnet50.yaml")
+    config_file = os.path.join("configs", "coco_resnet34.yaml")
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 

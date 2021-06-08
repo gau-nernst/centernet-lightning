@@ -15,7 +15,7 @@ import os
 import matplotlib.pyplot as plt
 
 from losses import FocalLossWithLogits, render_target_heatmap
-from metrics import eval_detections
+from metrics import class_tpfp_batch
 from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes, draw_heatmap
 
 _resnet_channels = {
@@ -291,7 +291,7 @@ class CenterNet(pl.LightningModule):
         backbone: nn.Module, 
         num_classes: int, 
         other_heads: Iterable[str]=["size", "offset"], 
-        loss_weights: Dict[str,float]=dict(size=0.1, offset=1),
+        loss_weights: Dict[str,float]=dict(size=1, offset=1),
         heatmap_bias: float=-2.19,
         max_pool_kernel: int=3,
         num_detections: int=40,
@@ -501,17 +501,34 @@ class CenterNet(pl.LightningModule):
             self.log(f"val/{k}_loss", v)
         self.log("val/total_loss", total_loss)
 
-        pred_detections = self.decode_detections(encoded_output, num_detections=10)
-        ap50, ar50 = self.evaluate_batch(pred_detections, batch)
-        self.log("val/ap50", ap50)
-        self.log("val/ar50", ar50)
-
+        pred_detections = self.decode_detections(encoded_output, num_detections=50)
+        class_tp, class_fp = self.evaluate_batch(pred_detections, batch)
+        
         # return these for logging image callback
         result = {
+            "tp": class_tp,
+            "fp": class_fp,
             "detections": pred_detections,
             "encoded_output": encoded_output
         }
         return result
+
+    def validation_epoch_end(self, outputs):
+        tp = np.zeros(self.num_classes, dtype=np.float32)
+        fp = np.zeros(self.num_classes, dtype=np.float32)
+        for x in outputs:
+            tp += x["tp"]
+            fp += x["fp"]
+        
+        class_ap = tp / (tp + fp + 1e-6)
+        mean_ap = np.average(class_ap)
+
+        for i in range(class_ap.shape[0]):
+            self.log(f"AP50/class_{i:02d}", class_ap[i])
+        
+        self.log("val/AP50_person", class_ap[0])
+        self.log("val/AP50_car", class_ap[2])
+        self.log("val/AP50", mean_ap)
 
     def test_step(self, batch, batch_idx):
         encoded_output = self(batch)
@@ -532,8 +549,8 @@ class CenterNet(pl.LightningModule):
         convert_cxcywh_to_x1y1x2y2(preds["bboxes"])
         convert_cxcywh_to_x1y1x2y2(targets["bboxes"])
 
-        ap50, ar50 = eval_detections(preds, targets, self.num_classes)
-        return ap50, ar50
+        class_tp, class_fp = class_tpfp_batch(preds, targets, self.num_classes, detection_threshold=0.1)
+        return class_tp, class_fp
 
     @torch.no_grad()
     def draw_sample_images(

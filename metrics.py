@@ -75,8 +75,8 @@ def tpfp_detections(pred_bboxes: np.ndarray, scores: np.ndarray, target_bboxes: 
     
     return tp, fp
 
-def eval_detections(detections, targets, num_classes, threshold=0.5, eps=1e-6):
-    """Run evaluation on a batch of predicted and ground truth detections
+def class_tpfp_batch(detections, targets, num_classes, iou_threshold=0.5, detection_threshold=0.5, eps=1e-6):
+    """Compute TP and FP on a batch of predicted and ground truth detections
     """
     # N x K predicted detections
     pred_bboxes = detections["bboxes"]
@@ -101,20 +101,15 @@ def eval_detections(detections, targets, num_classes, threshold=0.5, eps=1e-6):
 
         # iterate over classes
         for i in range(num_classes):
-            pred_class_indices = (pred_labels[b] == i)
+            pred_class_indices = (pred_labels[b] == i) & (pred_scores[b] >= detection_threshold)
             target_class_indices = (batch_target_labels == i)
 
             batch_pred_bboxes_i = pred_bboxes[b,pred_class_indices,:]
             batch_pred_scores_i = pred_scores[b,pred_class_indices]
             batch_target_bboxes_i = batch_target_bboxes[target_class_indices,:]
             
-            tp, fp = tpfp_detections(batch_pred_bboxes_i, batch_pred_scores_i, batch_target_bboxes_i, threshold=threshold)
+            tp, fp = tpfp_detections(batch_pred_bboxes_i, batch_pred_scores_i, batch_target_bboxes_i, threshold=iou_threshold)
             class_tp[i] += tp
             class_fp[i] += fp
-
-    class_ap = tp / (tp + fp + eps)
-    mean_ap = np.average(class_ap)
-    class_ar =  tp / (target_mask.sum(axis=-1) + eps)
-    mean_ar = np.average(class_ar)
-
-    return mean_ap, mean_ar
+            
+    return class_tp, class_fp

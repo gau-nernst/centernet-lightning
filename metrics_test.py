@@ -1,5 +1,5 @@
 import numpy as np
-from metrics import compute_iou_matrix, tpfp_detections, eval_detections
+from metrics import compute_iou_matrix, tpfp_detections, class_tpfp_batch
 
 class TestMetrics:
     pred_bboxes = np.array([
@@ -69,4 +69,8 @@ class TestMetrics:
             "labels": np.expand_dims(self.target_labels, 0),
         }
 
-        ap50, ar50 = eval_detections(detections, targets, self.num_classes)
+        ap50, ar50 = class_tpfp_batch(detections, detections, self.num_classes)
+        assert ap50 == 1
+        assert ar50 == 1
+
+        ap50, ar50 = class_tpfp_batch(detections, targets, self.num_classes)
