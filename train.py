@@ -13,7 +13,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from datasets import COCODataset, collate_detections_with_padding, prepare_coco_detection
-from model import simple_mobilenet_backbone, simple_resnet_backbone, CenterNet
+from model import simple_mobilenet_backbone, simple_resnet_backbone, fpn_resnet_backbone, fpn_mobilenet_backbone, CenterNet
 
 def get_train_augmentations(img_width=512, img_height=512):
     # from centernet paper
@@ -47,8 +47,9 @@ def apply_mpl_cmap(input: torch.Tensor, cmap: str, return_tensor=False, channel_
 
 class LogImageCallback(pl.Callback):
     
-    def __init__(self, use_wandb=False):
+    def __init__(self, use_wandb=False, num_samples=8):
         self.use_wandb = use_wandb
+        self.num_samples = num_samples
 
     def on_validation_batch_end(self, trainer, pl_module: CenterNet, outputs, batch, batch_idx, dataloader_idx):
         if batch_idx == 0:
@@ -57,14 +58,13 @@ class LogImageCallback(pl.Callback):
 
             # only log sample images for the first validation batch
             imgs = batch["image"]
-            num_samples = 8
             cmap = "viridis"
 
             # draw bounding boxes on val images
-            sample_imgs = pl_module.draw_sample_images(imgs, pred_detections, batch, N_samples=num_samples)
+            sample_imgs = pl_module.draw_sample_images(imgs, pred_detections, batch, N_samples=self.num_samples)
             
             # log output heatmap
-            pred_heatmap = encoded_output["heatmap"][:num_samples].cpu()
+            pred_heatmap = encoded_output["heatmap"][:self.num_samples].cpu()
             pred_heatmap = torch.sigmoid(pred_heatmap)                      # convert to probability
             pred_heatmap, _ = torch.max(pred_heatmap, dim=1)                # aggregate heatmaps across classes/channels
             pred_heatmap_scaled = pred_heatmap / torch.max(pred_heatmap)    # scale to [0,1]
@@ -73,7 +73,7 @@ class LogImageCallback(pl.Callback):
             pred_heatmap_scaled = apply_mpl_cmap(pred_heatmap_scaled, cmap)
 
             # log backbone feature map
-            backbone_feature_map = encoded_output["backbone_features"][:num_samples].cpu()
+            backbone_feature_map = encoded_output["backbone_features"][:self.num_samples].cpu()
             backbone_feature_map = torch.mean(backbone_feature_map, dim=1)      # mean aggregate
             backbone_feature_map = apply_mpl_cmap(backbone_feature_map, cmap)
             
@@ -97,7 +97,7 @@ class LogImageCallback(pl.Callback):
                         trainer.global_step, dataformats="nhwc")
 
 
-def train(config, use_wandb=False):
+def train(config, run_name=None, use_wandb=False):
     # training hyperparameters
     num_epochs = config["TRAINER"]["EPOCHS"]
     batch_size = config["TRAINER"]["BATCH_SIZE"]
@@ -127,6 +127,7 @@ def train(config, use_wandb=False):
 
     # set up pytorch lightning model and trainer
     backbone_family = config["MODEL"]["BACKBONE"]["FAMILY"]
+    backbone_fpn = config["MODEL"]["BACKBONE"]["FPN"]
     backbone_archi = config["MODEL"]["BACKBONE"]["ARCHITECTURE"]
     upsample_init = config["MODEL"]["BACKBONE"]["UPSAMPLE_INIT_BILINEAR"]
     other_heads = config["MODEL"]["OUTPUT_HEADS"]["OTHER_HEADS"]
@@ -136,11 +137,18 @@ def train(config, use_wandb=False):
 
     # build model
     if backbone_family == "resnet":
-        backbone = simple_resnet_backbone(
-            backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+        if backbone_fpn:
+            backbone = fpn_resnet_backbone(backbone_archi, pretrained=True)
+        else:
+            backbone = simple_resnet_backbone(
+                backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+    
     elif backbone_family == "mobilenet":
-        backbone = simple_mobilenet_backbone(
-            backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
+        if backbone_fpn:
+            backbone = fpn_mobilenet_backbone(backbone_archi, pretrained=True)
+        else:
+            backbone = simple_mobilenet_backbone(
+                backbone_archi, pretrained=True, upsample_init_bilinear=upsample_init)
     else:
         raise ValueError(f"{backbone_family} not supported")
     
@@ -150,10 +158,10 @@ def train(config, use_wandb=False):
         batch_size=batch_size, optimizer=optimizer, lr=lr)
     
     if use_wandb:
-        logger = WandbLogger(project="CenterNet")
+        logger = WandbLogger(project="CenterNet", name=run_name)
         logger.watch(model)
     else:
-        logger = TensorBoardLogger("tb_logs")
+        logger = TensorBoardLogger("tb_logs", name=run_name)
     
     logger.log_hyperparams({
         "backbone architecture": backbone_archi,
@@ -168,17 +176,18 @@ def train(config, use_wandb=False):
 
     trainer = pl.Trainer(
         gpus=1,
-        # max_epochs=num_epochs,
-        max_steps=500,              # train for 500 steps  
-        limit_val_batches=20,       # only run validation on 20 batches
-        val_check_interval=100,     # run validation every 100 steps
+        max_epochs=num_epochs,
+        # max_steps=500,              # train for 500 steps  
+        # limit_val_batches=20,       # only run validation on 20 batches
+        val_check_interval=1000,     # run validation every 100 steps
         logger=logger,
-        callbacks=[LogImageCallback(use_wandb)]
+        callbacks=[LogImageCallback(use_wandb, 16)]
     )
     
     trainer.fit(model, train_dataloader, val_dataloader)
 
 if __name__ == "__main__":
+    run_name = "coco_resnet50"
     use_wandb = True
 
     if use_wandb:
@@ -191,4 +200,4 @@ if __name__ == "__main__":
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    train(config, use_wandb=use_wandb)
+    train(config, run_name=run_name, use_wandb=use_wandb)

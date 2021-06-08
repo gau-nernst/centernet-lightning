@@ -3,3 +3,5 @@ __pycache__/
 scratchpad.ipynb
 lightning_logs/
 datasets
+wandb/
+.wandb_key

@@ -1,7 +1,7 @@
 MODEL:
-  BACKBONE: 
+  BACKBONE:
     FAMILY: resnet
-    FPN: False
+    FPN: True
     ARCHITECTURE: resnet50
     UPSAMPLE_INIT_BILINEAR: True
   

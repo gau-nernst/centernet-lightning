@@ -1,8 +1,6 @@
 MODEL:
   BACKBONE: 
-    FAMILY: resnet
-    FPN: False
-    ARCHITECTURE: resnet50
+    ARCHITECTURE: mobilenetv3_large
     UPSAMPLE_INIT_BILINEAR: True
   
   OUTPUT_HEADS:
@@ -24,7 +22,7 @@ DATASET:
     COCO_NAME: val2017
 
 TRAINER:
-  EPOCHS: 10
-  BATCH_SIZE: 32
+  EPOCHS: 1
+  BATCH_SIZE: 64
   LEARNING_RATE: 0.0001
   OPTIMIZER: adam

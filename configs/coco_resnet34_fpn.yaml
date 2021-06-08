@@ -1,13 +1,13 @@
 MODEL:
-  BACKBONE: 
+  BACKBONE:
     FAMILY: resnet
-    FPN: False
-    ARCHITECTURE: resnet50
+    FPN: True
+    ARCHITECTURE: resnet34
     UPSAMPLE_INIT_BILINEAR: True
   
   OUTPUT_HEADS:
     OTHER_HEADS: [size, offset]
-    HEATMAP_BIAS: -2.19
+    HEATMAP_BIAS: -4.595
     LOSS_WEIGHTS:
       SIZE: 1
       OFFSET: 1
@@ -25,6 +25,6 @@ DATASET:
 
 TRAINER:
   EPOCHS: 10
-  BATCH_SIZE: 32
+  BATCH_SIZE: 64
   LEARNING_RATE: 0.0001
   OPTIMIZER: adam
