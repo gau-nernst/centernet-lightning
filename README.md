@@ -20,6 +20,7 @@ Main dependencies
 Other dependencies
 
 - pytest (for unit testing, not required to run)
+- wandb (for Weights and Biases logging, not required to run)
 
 Environment tested: Windows 10 and Linux (Ubuntu), python=3.8, pytorch=1.8.1, torchvision=0.9.1, cudatoolkit=11.1
 
@@ -48,28 +49,47 @@ conda install pytorch-lightning -c conda-forge
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
 pip install opencv-python
 pip install -U albumentations --no-binary imgaug,albumentations
+pip install wandb           # optional
 ```
 
 ## Usage
 
-The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the given output heads in parallel. `CenterNet` also implements a few functions to help with training and running detections.
+Create a supported backbone and pass it to the `CenterNet` class to create a CenterNet model.
+
+```python
+from model import simple_resnet_backbone, CenterNet
+
+backbone = simple_resnet_backbone("resnet34")
+model = CenterNet(mod)
+```
+
+## Model architecture
+
+The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the specified output heads in parallel. The `CenterNet` class also implements a few functions to help with training and running detections.
 
 Backbones:
 
-- [x] `ResNetBackbone`: implemented using torchvision's ResNet. It's ResNet with an upsample stage, as specified in the original paper. DCN layer is not implemented.
-- [ ] `ResNetFPNBackbone`: not implemented. The author does not implement this, but TensorFlow implements this
+- [x] `SimpleBackbone`: a base CNN network with an upsample stage with convolution transpose. It is the ResNet model specified in the original paper. DCN layer is not supported. SimpleBackbone with ResNet and MobileNet (from torchvision) are implemented.
+- [x] `FPNBackbone`: a base CNN network with a feature pyramid to fuse feature maps at different resolutions. ResNet and MobileNet FPN are implemented.
+- [ ] `IDABackbone`: not implemented
 - [ ] `DLABackbone`: not implemented. The author claims this is the best backbone for CenterNet/Track
 
 Output heads:
 
 - [x] `heatmap`: compulsory, class scores at each position
-- [x] `size`: width and height regression, to determin bounding box size
+- [x] `size`: (relative) width and height regression, to determin bounding box size
 - [x] `offset`: center x and y offset regression, to refine center's position
 - [ ] `displacement`: for CenterTrack, currently not implemented
 
 ## Training
 
-Use `train.py`. Specify hyperparameters in config file. PyTorch Lightning is used for training.
+PyTorch Lightning is used for training. Use `train.py` to train the model. You need to specify the backbone and hyperparameters in a YAML config file. Modify `train.py` to use your own config file. Some sample configs are provided in the `configs/` directory. 
+
+```bash
+python train.py
+```
+
+To use Weights and Biases logging, set `use_wandb = True` in the training script. Create a file named `.wandb_key` and place your wandb API key in this file.
 
 ## Dataset
 
@@ -114,9 +134,7 @@ You can write your own custom dataset, as long as it conforms to the format that
 - `image`: images in `CHW` format. Shape `NCHW`.
 - `bboxes`: bounding boxes `(x_center, y_center, width, height)` in relative scale `[0,1]`. Shape `ND4`, where `D` is the number of detections in one image.
 - `labels`: labels `[0,num_classes-1]`. Shape `ND`.
-- `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same sizes within one batch. This is used in calculating loss. Shape `ND`.
-
-This format is used in `forward()`, and `compute_loss()` methods
+- `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same lengths within one batch. This is used in calculating loss. Shape `ND`.
 
 ## Notes
 
