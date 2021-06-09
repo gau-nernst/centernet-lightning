@@ -134,9 +134,9 @@ class SimpleBackbone(nn.Module):
         )
         upsample_layers.append(up_layer)
 
-        for i in range(len(upsample_channels)-1):
+        for i in range(1, len(upsample_channels)):
             up_layer = UpsampleBlock(
-                upsample_channels[i], upsample_channels[i+1], deconv_kernel=upsample_kernels[i+1], 
+                upsample_channels[i-1], upsample_channels[i], deconv_kernel=upsample_kernels[i], 
                 init_bilinear=upsample_init_bilinear
             )
             upsample_layers.append(up_layer)
@@ -195,7 +195,7 @@ class FPNBackbone(nn.Module):
         self.top_down_convs = nn.ModuleList()
 
         for i in range(len(top_down_channels)):
-            in_channels = bottom_up_channels[-1-i]
+            in_channels = bottom_up_channels[-2-i]
             out_channels = top_down_channels[i]
 
             # 1x1 conv to match number of channels
@@ -217,6 +217,8 @@ class FPNBackbone(nn.Module):
             self.lateral_projections.append(lateral_conv)
             self.top_down_convs.append(output_conv)
 
+        # 1x1 conv to change number of channels at the top
+        self.top_project = nn.Conv2d(bottom_up_channels[-1], top_down_channels[0], kernel_size=1, stride=1)
         self.out_channels = top_down_channels[-1]
 
     def forward(self, x):
@@ -227,14 +229,13 @@ class FPNBackbone(nn.Module):
             next_feature = self.bottom_up[i](bottom_up_features[-1])
             bottom_up_features.append(next_feature)
 
-        # feature at pyramid top
-        out = self.lateral_projections[0](bottom_up_features[-1])
-        out = self.top_down_convs[0](out)
+        # feature at pyramid top. 1x1 conv 
+        out = self.top_project(bottom_up_features[-1])
 
         # top down path
-        for i in range(1, len(self.lateral_projections)):
+        for i in range(len(self.lateral_projections)):
             out = F.interpolate(out, scale_factor=2, mode="nearest")            # scale up
-            lateral = self.lateral_projections[i](bottom_up_features[-i-1])     # lateral skip connection
+            lateral = self.lateral_projections[i](bottom_up_features[-2-i])     # lateral skip connection
             
             out = out + lateral                 # merge
             out = self.top_down_convs[i](out)   # conv block
