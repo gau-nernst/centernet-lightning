@@ -67,7 +67,7 @@ class LogImageCallback(pl.Callback):
             sample_imgs = pl_module.draw_sample_images(imgs, pred_detections, batch, N_samples=self.num_samples)
             
             # log output heatmap
-            pred_heatmap = encoded_output["heatmap"][:self.num_samples].cpu()
+            pred_heatmap = encoded_output["heatmap"][:self.num_samples].cpu().float()
             pred_heatmap = torch.sigmoid(pred_heatmap)                      # convert to probability
             pred_heatmap, _ = torch.max(pred_heatmap, dim=1)                # aggregate heatmaps across classes/channels
             pred_heatmap_scaled = pred_heatmap / torch.max(pred_heatmap)    # scale to [0,1]
@@ -76,7 +76,7 @@ class LogImageCallback(pl.Callback):
             pred_heatmap_scaled = apply_mpl_cmap(pred_heatmap_scaled, cmap)
 
             # log backbone feature map
-            backbone_feature_map = encoded_output["backbone_features"][:self.num_samples].cpu()
+            backbone_feature_map = encoded_output["backbone_features"][:self.num_samples].cpu().float()
             backbone_feature_map = torch.mean(backbone_feature_map, dim=1)      # mean aggregate
             backbone_feature_map = apply_mpl_cmap(backbone_feature_map, cmap)
             
@@ -100,7 +100,7 @@ class LogImageCallback(pl.Callback):
                         trainer.global_step, dataformats="nhwc")
 
 
-def train(config, run_name=None, use_wandb=False):
+def train(config, run_name=None, use_wandb=False, precision=32):
     # training hyperparameters
     num_epochs = config["TRAINER"]["EPOCHS"]
     batch_size = config["TRAINER"]["BATCH_SIZE"]
@@ -179,6 +179,7 @@ def train(config, run_name=None, use_wandb=False):
 
     trainer = pl.Trainer(
         gpus=1,
+        precision=precision,
         max_epochs=num_epochs,
         # max_steps=500,              # train for 500 steps  
         limit_val_batches=50,       # only run validation on 20 batches
@@ -190,8 +191,9 @@ def train(config, run_name=None, use_wandb=False):
     trainer.fit(model, train_dataloader, val_dataloader)
 
 if __name__ == "__main__":
-    run_name = "coco_resnet34_1epoch_test"
+    run_name = "resnet34-10epochs-halfp"
     use_wandb = True
+    precision = 16
 
     if use_wandb:
         # read wandb API key from file
@@ -203,4 +205,4 @@ if __name__ == "__main__":
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    train(config, run_name=run_name, use_wandb=use_wandb)
+    train(config, run_name=run_name, use_wandb=use_wandb, precision=precision)

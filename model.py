@@ -542,8 +542,8 @@ class CenterNet(pl.LightningModule):
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
         # move to cpu and convert to numpy
-        preds = {k: v.cpu().numpy() for k,v in preds.items()}
-        targets = {k: v.cpu().numpy() for k,v in targets.items()}
+        preds = {k: v.cpu().float().numpy() for k,v in preds.items()}
+        targets = {k: v.cpu().float().numpy() for k,v in targets.items()}
 
         # convert cxcywh to x1y1x2y2
         convert_cxcywh_to_x1y1x2y2(preds["bboxes"])
@@ -559,18 +559,18 @@ class CenterNet(pl.LightningModule):
         ):
         N_samples = min(imgs.shape[0], N_samples)
 
-        samples = imgs[:N_samples].cpu().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
+        samples = imgs[:N_samples].cpu().float().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
         samples = np.ascontiguousarray(samples)     # C-contiguous, for opencv
         # samples = np.ascontiguousarray(samples[:,::2,::2,:])        # fast downsample via resampling  
 
-        target_bboxes = targets["bboxes"].cpu().numpy()
+        target_bboxes = targets["bboxes"].cpu().float().numpy()
         convert_cxcywh_to_x1y1x2y2(target_bboxes)
         target_labels = targets["labels"].cpu().numpy().astype(int)
 
-        pred_bboxes = preds["bboxes"].cpu().numpy()
+        pred_bboxes = preds["bboxes"].cpu().float().numpy()
         convert_cxcywh_to_x1y1x2y2(pred_bboxes)
         pred_labels = preds["labels"].cpu().numpy().astype(int)
-        pred_scores = preds["scores"].cpu().numpy()
+        pred_scores = preds["scores"].cpu().float().numpy()
 
         for i in range(N_samples):
             draw_bboxes(
