@@ -69,6 +69,8 @@ def prepare_coco_detection(data_dir, coco_name):
         img_ids = coco.getImgIds()                          # list of all image ids
         img_info = coco.loadImgs(img_ids)                   # list of dictionary
         img_names = [x["file_name"] for x in img_info]      # we only need file_name
+        img_widths = [x["width"] for x in img_info]
+        img_heights = [x["height"] for x in img_info]
 
         annotate_ids = [coco.getAnnIds(imgIds=x) for x in img_ids]      # get annotations for each image
         annotates = [coco.loadAnns(ids=x) for x in annotate_ids]        
@@ -95,7 +97,10 @@ def prepare_coco_detection(data_dir, coco_name):
         # labels = [[id_to_label[x["category_id"]] for x in ann] for ann in annotates]
         
         detection = {
+            "img_ids": img_ids,
             "img_names": img_names,
+            "img_widths": img_widths,
+            "img_heights": img_heights,
             "bboxes": bboxes,
             "labels": labels
         }
@@ -114,7 +119,8 @@ class COCODataset(Dataset):
         data_name: str, 
         transforms=None, 
         img_width: int=512, 
-        img_height: int=512
+        img_height: int=512,
+        eval: bool=False
         ):
         super(COCODataset, self).__init__()
 
@@ -126,6 +132,12 @@ class COCODataset(Dataset):
         with open(label_map_file, "rb") as f:
             label_to_name = pickle.load(f)
 
+        self.eval = eval
+        if eval:
+            self.img_ids = detection["img_ids"]
+            self.original_widths = detection["img_widths"]
+            self.original_heights = detection["img_heights"]
+        
         self.img_names = detection["img_names"]
         self.bboxes = detection["bboxes"]
         self.labels = detection["labels"]
@@ -193,24 +205,27 @@ class COCODataset(Dataset):
             "bboxes": bboxes,
             "labels": labels
         }
+        if self.eval:
+            data["img_ids"] = self.img_ids[index]
+            data["original_widths"] = self.original_widths[index]
+            data["original_heights"] = self.original_heights[index]
+        
         return data
 
     def __len__(self):
         return len(self.img_names)
 
 def collate_detections_with_padding(batch, pad_value=0):
-    output = {
-        "image": [],
-        "bboxes": [],
-        "labels": [],
-        "mask": []
-    }
+    output = {key: [] for key in batch[0]}
+    output["mask"] = []
     max_size = 0
 
     for item in batch:
-        output["image"].append(item["image"])
-        output["bboxes"].append(item["bboxes"])
-        output["labels"].append(item["labels"])
+        # output["image"].append(item["image"])
+        # output["bboxes"].append(item["bboxes"])
+        # output["labels"].append(item["labels"])
+        for key in item:
+            output[key].append(item[key])
 
         max_size = max(max_size, len(item["labels"]))
     
@@ -224,8 +239,11 @@ def collate_detections_with_padding(batch, pad_value=0):
             output["mask"][i].append(0)    
     
     output["image"] = torch.stack(output["image"], dim=0)
-    output["bboxes"] = torch.Tensor(output["bboxes"])
-    output["labels"] = torch.Tensor(output["labels"])
-    output["mask"] = torch.Tensor(output["mask"])
+    # output["bboxes"] = torch.tensor(output["bboxes"])
+    # output["labels"] = torch.tensor(output["labels"])
+    # output["mask"] = torch.tensor(output["mask"])
+    for key, value in output.items():
+        if key != "image":
+            output[key] = torch.tensor(value)
     
     return output
