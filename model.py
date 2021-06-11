@@ -51,7 +51,7 @@ class UpsampleBlock(nn.Module):
     # upsampling + conv
     # TODO: add support for depth-wise conv?
     def __init__(
-        self, in_channels: int, out_channels: int, 
+        self, in_channels: int, out_channels: int,
         deconv_kernel: int, deconv_stride: int=2,
         deconv_pad: int=1, deconv_out_pad: int=0, 
         dcn: bool=False, init_bilinear: bool=True):
@@ -218,7 +218,10 @@ class FPNBackbone(nn.Module):
             self.top_down_convs.append(output_conv)
 
         # 1x1 conv to change number of channels at the top
-        self.top_project = nn.Conv2d(bottom_up_channels[-1], top_down_channels[0], kernel_size=1, stride=1)
+        if bottom_up_channels[-1] != top_down_channels[0]:
+            self.top_project = nn.Conv2d(bottom_up_channels[-1], top_down_channels[0], kernel_size=1, stride=1)
+        else:
+            self.top_project = nn.Identity()
         self.out_channels = top_down_channels[-1]
 
     def forward(self, x):
