@@ -34,6 +34,7 @@ _mobilenet_channels = {
 _optimizer_mapper = {
     "sgd": torch.optim.SGD,
     "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
     "rmsprop": torch.optim.RMSprop
 }
 
@@ -508,14 +509,15 @@ class CenterNet(pl.LightningModule):
         pred_detections = self.decode_detections(encoded_output, num_detections=50)
         class_tp, class_fp = self.evaluate_batch(pred_detections, batch)
         
-        # return these for logging image callback
-        result = {
-            "tp": class_tp,
-            "fp": class_fp,
-            "detections": pred_detections,
-            "encoded_output": encoded_output
-        }
-        return result
+        if batch_idx == 0:
+            # return these for logging image callback
+            result = {
+                "tp": class_tp,
+                "fp": class_fp,
+                "detections": pred_detections,
+                "encoded_output": encoded_output
+            }
+            return result
 
     def validation_epoch_end(self, outputs):
         tp = np.zeros(self.num_classes, dtype=np.float32)
