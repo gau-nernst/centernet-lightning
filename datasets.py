@@ -46,6 +46,7 @@ def prepare_coco_detection(data_dir, coco_name):
     os.makedirs(save_dir, exist_ok=True)
     detection_file = os.path.join(save_dir, "detections.pkl")
     label_map_file = os.path.join(save_dir, "label_map.pkl")
+    id_map_file = os.path.join(save_dir, "id_map.pkl")
 
     # if already exist on disk, don't do anything
     if os.path.exists(detection_file) and os.path.exists(label_map_file):
@@ -60,11 +61,14 @@ def prepare_coco_detection(data_dir, coco_name):
         id_to_label = {}
         label_to_name = {}
         for i,(k,v) in enumerate(categories.items()):
-            id_to_label[k] = i
+            id_to_label[v["id"]] = i
             label_to_name[i] = v["name"]
 
         with open(label_map_file, "wb") as f:
             pickle.dump(label_to_name, f)     # save to disk
+
+        with open(id_map_file, "wb") as f:
+            pickle.dump(id_to_label, f)
 
         img_ids = coco.getImgIds()                          # list of all image ids
         img_info = coco.loadImgs(img_ids)                   # list of dictionary
@@ -126,11 +130,15 @@ class COCODataset(Dataset):
 
         detection_file = os.path.join(data_dir, "annotations", data_name, "detections.pkl")
         label_map_file = os.path.join(data_dir, "annotations", data_name, "label_map.pkl")
+        id_map_file = os.path.join(data_dir, "annotations", data_name, "id_map.pkl")
         with open(detection_file, "rb") as f:
             detection = pickle.load(f)
 
         with open(label_map_file, "rb") as f:
             label_to_name = pickle.load(f)
+
+        with open(id_map_file, "rb") as f:
+            id_to_label = pickle.load(f)
 
         self.eval = eval
         if eval:
@@ -142,6 +150,7 @@ class COCODataset(Dataset):
         self.bboxes = detection["bboxes"]
         self.labels = detection["labels"]
         self.label_to_name = label_to_name
+        self.id_to_label = id_to_label
         self.num_classes = len(label_to_name)
         self.img_dir = os.path.join(data_dir, data_name)
 
