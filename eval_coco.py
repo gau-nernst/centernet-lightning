@@ -9,21 +9,26 @@ from utils import convert_cxcywh_to_xywh
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-def eval_coco(checkpoint):
+def eval_coco(checkpoint, force_inference=False):
     detection_file ="coco_val2017_results.json"
 
-    if not os.path.exists("detection_file"):
+    if not os.path.exists("detection_file") or force_inference:
+        print("Running inference on COCO val2017")
+
+        print("Loading dataset")
         val_dataset = COCODataset("datasets/COCO", "val2017", eval=True)
-        val_dataloader = DataLoader(val_dataset, batch_size=128, num_workers=4, collate_fn=collate_detections_with_padding)
+        val_dataloader = DataLoader(val_dataset, batch_size=8, num_workers=4, collate_fn=collate_detections_with_padding)
 
         label_to_id = {v: k for k,v in val_dataset.id_to_label.items()}
 
-        backbone = fpn_resnet_backbone("resnet34")
+        print("Creating and restoring model")
+        backbone = fpn_resnet_backbone("resnet50")
         model = CenterNet.load_from_checkpoint(checkpoint, backbone=backbone, num_classes=val_dataset.num_classes)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         results = []
-
+        
+        print("Running inference")
         model.to(device)
         model.eval()
         with torch.no_grad():
@@ -60,21 +65,22 @@ def eval_coco(checkpoint):
 
                     results.append(item)
 
-
+        print("Writing detections to file")
         with open(detection_file, "w", encoding="utf-8") as f:
             json.dump(results, f)
 
+    print("Running COCO evaluation")
     coco_gt = COCO("datasets/COCO/annotations/instances_val2017.json")
     coco_pred = coco_gt.loadRes(detection_file)
     img_ids = sorted(coco_gt.getImgIds())
     
     coco_eval = COCOeval(coco_gt, coco_pred, "bbox")
     coco_eval.params.imgIds = img_ids
-    coco_eval.params.catIds = [1]
+    # coco_eval.params.catIds = [1]
 
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
 
 if __name__ == "__main__":
-    eval_coco("wandb/run-20210608_155407-3i1smv1t/files/CenterNet/3i1smv1t/checkpoints/epoch=9-step=73929.ckpt")
+    eval_coco("wandb/run-20210614_121420-3mgn6vai/files/CenterNet/3mgn6vai/checkpoints/epoch=19-step=295719.ckpt", force_inference=True)
