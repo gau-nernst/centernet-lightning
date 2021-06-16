@@ -75,7 +75,7 @@ class UpsampleBlock(nn.Module):
             padding=deconv_pad, output_padding=deconv_out_pad, bias=False)
         # self.deconv = nn.UpsamplingBilinear2d(scale_factor=2)
         self.bn_deconv = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
+        self.relu = nn.ReLU(inplace=True)
 
         # default behavior, initialize weights to bilinear upsampling
         # TF CenterNet does not do this
@@ -210,9 +210,9 @@ class FPNBackbone(nn.Module):
             else:
                 next_channels = top_down_channels[i+1]
             output_conv = nn.Sequential(
-                nn.Conv2d(out_channels, next_channels, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(out_channels, next_channels, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.BatchNorm2d(next_channels),
-                nn.ReLU()
+                nn.ReLU(inplace=True)
             )
 
             self.lateral_projections.append(lateral_conv)
@@ -302,7 +302,10 @@ class CenterNet(pl.LightningModule):
         num_detections: int=40,
         batch_size: int=4,
         optimizer: str="adam",
-        lr: float=1e-3
+        lr: float=1e-3,
+        lr_scheduler: str=None,
+        num_epochs: float=None,
+        steps_per_epoch: int=None
         ):
         super(CenterNet, self).__init__()
         self.backbone = backbone
@@ -336,13 +339,17 @@ class CenterNet(pl.LightningModule):
         # for pytorch lightning tuner
         self.batch_size = batch_size
         self.learning_rate = lr
+        # for OneCycleLR scheduler
+        self.lr_scheduler = lr_scheduler
+        self.num_epochs = num_epochs
+        self.steps_per_epoch = steps_per_epoch
 
     def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float=None):
         # Reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
         conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        relu = nn.ReLU()
+        relu = nn.ReLU(inplace=True)
         conv2 = nn.Conv2d(in_channels, out_channels, 1)
 
         if fill_bias != None:
@@ -593,5 +600,16 @@ class CenterNet(pl.LightningModule):
     def configure_optimizers(self):
         optimizer_algo = _optimizer_mapper.get(self.optimizer_name, torch.optim.Adam)
         optimizer = optimizer_algo(self.parameters(), lr=self.learning_rate)
+        
         # lr scheduler
+        if self.lr_scheduler == None:
+            return optimizer
+        
+        elif self.lr_scheduler == "onecyclelr":
+            lr_scheuler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=self.learning_rate,
+                epochs=self.num_epochs, steps_per_epoch=self.steps_per_epoch)
+        
+            return {"optimizer": optimizer, "lr_scheduler": lr_scheuler}
+
         return optimizer

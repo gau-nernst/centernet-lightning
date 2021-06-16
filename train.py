@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+from pytorch_lightning.callbacks import LearningRateMonitor
 import wandb
 
 import albumentations as A
@@ -106,6 +107,7 @@ def train(config, run_name=None, use_wandb=False, precision=32):
     batch_size = config["TRAINER"]["BATCH_SIZE"]
     optimizer = config["TRAINER"]["OPTIMIZER"]
     lr = config["TRAINER"]["LEARNING_RATE"]
+    lr_scheduler = config["TRAINER"]["LR_SCHEDULER"]
 
     # set up dataset
     train_data_dir = config["DATASET"]["TRAIN"]["DATA_DIR"]
@@ -155,10 +157,12 @@ def train(config, run_name=None, use_wandb=False, precision=32):
     else:
         raise ValueError(f"{backbone_family} not supported")
     
+    # refactor CenterNet to take in hparams dict
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
         heatmap_bias=heatmap_bias, loss_weights=loss_weights,
-        batch_size=batch_size, optimizer=optimizer, lr=lr)
+        batch_size=batch_size, optimizer=optimizer, lr=lr, lr_scheduler=lr_scheduler,
+        num_epochs=num_epochs, steps_per_epoch=len(train_dataloader))
     
     if use_wandb:
         logger = WandbLogger(project="CenterNet", name=run_name, log_model=True)
@@ -174,7 +178,8 @@ def train(config, run_name=None, use_wandb=False, precision=32):
         "offset_loss_weight": loss_weights["offset"],
         "batch_size": batch_size,
         "optimizer": optimizer,
-        "learning_rate": lr
+        "learning_rate": lr,
+        "lr_scheduler": lr_scheduler
     })
 
     trainer = pl.Trainer(
@@ -182,16 +187,20 @@ def train(config, run_name=None, use_wandb=False, precision=32):
         precision=precision,
         max_epochs=num_epochs,
         # max_steps=500,              # train for 500 steps  
-        limit_val_batches=50,       # only run validation on 20 batches
-        val_check_interval=1000,     # run validation every 100 steps
+        # limit_val_batches=50,       # only run validation on 50 batches
+        val_check_interval=0.5,     # run validation every half epoch
         logger=logger,
-        callbacks=[LogImageCallback(use_wandb, 16)]
+        callbacks=[
+            LogImageCallback(use_wandb, 16),
+            LearningRateMonitor(logging_interval="step")
+        ],
+        benchmark=True,             # set torch.backends.cudnn.benchmark = True
     )
     
     trainer.fit(model, train_dataloader, val_dataloader)
 
 if __name__ == "__main__":
-    run_name = "resnet34-10epochs-halfp"
+    run_name = "resnet50-fpn-20epochs-adamw"
     use_wandb = True
     precision = 16
 
@@ -201,7 +210,7 @@ if __name__ == "__main__":
             os.environ["WANDB_API_KEY"] = f.readline().rstrip()
         
     # load config from yaml file
-    config_file = os.path.join("configs", "coco_resnet34.yaml")
+    config_file = os.path.join("configs", "coco_resnet50_fpn.yaml")
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
