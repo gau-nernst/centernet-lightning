@@ -1,22 +1,14 @@
 model:
   backbone:
     name: resnet34
-    pretrained: True
     upsample_channels: 256, 128, 64
-    conv_upsample_block:
+    upsample_block:
+      conv_first: True
       upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
       conv_type: normal                 # normal, separable, dcn
-      deconv_params:                    # only used with conv_transpose
-        kernel_size: 4                  
-        stride: 2
-        padding: 1
-        output_padding: 0
-        bias: False
+      deconv_kernel: 4                  # only used with conv_transpose
       init_bilinear: True               # only used with conv_transpose
   
-    skip_connection:
-      kernel_size: 1
-
   num_classes: 78
   output_heads:
     other_heads: [size, offset]
@@ -45,8 +37,7 @@ trainer:
   val_check_interval: 0.5
   callbacks:
 
-optimizer:
-  name: adam
-  lr: 0.0001
-  lr_scheduler:
-    name:
+  optimizer:
+    name: adam
+    lr: 0.0001
+  
