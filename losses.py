@@ -39,7 +39,7 @@ class FocalLossWithLogits(nn.Module):
 def render_target_heatmap(
     shape: Iterable, centers: torch.Tensor, sizes: torch.Tensor, 
     indices: torch.Tensor, mask: torch.Tensor, 
-    alpha: float=0.54, device: str="cpu", eps=1e-6
+    alpha: float=0.54, device: str="cpu", eps=1e-8
     ):
     """Render target heatmap using Gaussian kernel from detections' bounding boxes
 
@@ -63,16 +63,15 @@ def render_target_heatmap(
     )
 
     # iterate over the detections
-    # for i in range(len(centers)):
     for i, m in enumerate(mask):
         if m == 0:
-            continue
+            break
         x = centers[i][0]
         y = centers[i][1]
         idx = indices[i]
 
         # gaussian kernel
-        radius_sq = (x - grid_x)**2/(2*var_w[i] + eps) + (y - grid_y)**2/(2*var_h[i] + eps)
+        radius_sq = (x - grid_x)**2 / (2*var_w[i] + eps) + (y - grid_y)**2 / (2*var_h[i] + eps)
         gaussian_kernel = torch.exp(-radius_sq)
         gaussian_kernel[y, x] = 1       # force the center to be 1
         # apply mask to ignore none detections from padding

@@ -158,7 +158,7 @@ def train(config, run_name=None, use_wandb=False, precision=32):
     model = CenterNet(
         backbone=backbone, num_classes=num_classes, other_heads=other_heads,
         heatmap_bias=heatmap_bias, loss_weights=loss_weights,
-        batch_size=batch_size, optimizer=optimizer, lr=lr)
+        batch_size=batch_size, optimizer=optimizer, learning_rate=lr)
     
     if use_wandb:
         logger = WandbLogger(project="CenterNet", name=run_name, log_model=True)

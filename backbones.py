@@ -285,3 +285,10 @@ def build_fpn_backbone(name: str, pretrained: str = True, **kwargs):
         raise ValueError(f"{name} is not supported")
 
     return FPNBackbone(downsample, downsample_channels, **kwargs)
+
+def build_backbone(name: str, pretrained: str = True, **kwargs):
+    if name.endswith("-fpn"):
+        name = name[:-4]
+        return build_fpn_backbone(name, pretrained=pretrained, **kwargs)
+    
+    return build_simple_backbone(name, pretrained=pretrained, **kwargs)

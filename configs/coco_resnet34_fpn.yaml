@@ -14,13 +14,13 @@ model:
         bias: False
       init_bilinear: True               # only used with conv_transpose
   
-    skip_connection:
+    skip_connection:                    # only used for fpn variants
       kernel_size: 1
 
   num_classes: 78
   output_heads:
     other_heads: [size, offset]
-    heatmap_bias: -4.595
+    heatmap_bias: -2.19
     loss_weights:
       size: 1
       offset: 1
@@ -43,10 +43,11 @@ trainer:
   precision: 16
   max_epochs: 10
   val_check_interval: 0.5
-  callbacks:
 
 optimizer:
   name: adam
-  lr: 0.0001
-  lr_scheduler:
-    name:
+  params:
+    lr: 0.0001
+
+  lr_scheduler_name: None
+  lr_scheduler_params: None

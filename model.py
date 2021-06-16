@@ -1,35 +1,18 @@
 from typing import Dict, Iterable, List
+from enum import Enum
+from copy import deepcopy
+import warnings
 
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torchvision
-import torchvision.models.resnet as resnet
-import torchvision.models.mobilenet as mobilenet
 import pytorch_lightning as pl
 
-import math
-import cv2
-import os
-import matplotlib.pyplot as plt
-
+from backbones import build_backbone
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import class_tpfp_batch
 from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes, draw_heatmap
-
-_resnet_channels = {
-    "resnet18": [64, 128, 256, 512],
-    "resnet34": [64, 128, 256, 512],
-    "resnet50": [256, 512, 1024, 2048],
-    "resnet101": [256, 512, 1024, 2048]
-}
-
-_mobilenet_channels = {
-    "mobilenet_v2": [16, 24, 32, 96, 1280],
-    "mobilenet_v3_small": [16, 16, 24, 48, 576],
-    "mobilenet_v3_large": [16, 24, 40, 112, 960]
-}
 
 _optimizer_mapper = {
     "sgd": torch.optim.SGD,
@@ -38,311 +21,77 @@ _optimizer_mapper = {
     "rmsprop": torch.optim.RMSprop
 }
 
-RED = (1., 0., 0.)
-BLUE = (0., 0., 1.)
+class Color(Enum):
+    RED = (1., 0., 0.)
+    BLUE = (0., 0., 1.)
 
-class UpsampleBlock(nn.Module):
-    """Upsample block (convolution transpose) with optional DCN (currently not supported)
-
-    Architecture: conv + conv transpose, with BN and relu
-    """
-    # NOTE: architecture choices
-    # conv + deconv (centernet)
-    # deconv + conv
-    # upsampling + conv
-    # TODO: add support for depth-wise conv?
-    def __init__(
-        self, in_channels: int, out_channels: int,
-        deconv_kernel: int, deconv_stride: int=2,
-        deconv_pad: int=1, deconv_out_pad: int=0, 
-        dcn: bool=False, init_bilinear: bool=True):
-        
-        super(UpsampleBlock, self).__init__()
-        if dcn:
-            # potential dcn implementations
-            # torchvision: https://pytorch.org/vision/stable/ops.html#torchvision.ops.deform_conv2d
-            # detectron: https://detectron2.readthedocs.io/en/latest/modules/layers.html#detectron2.layers.ModulatedDeformConv
-            # mmcv: https://mmcv.readthedocs.io/en/stable/api.html#mmcv.ops.DeformConv2d
-            raise NotImplementedError()
-        
-        else:
-            self.conv = nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1, bias=False)
-        self.bn_conv = nn.BatchNorm2d(out_channels)
-
-        # NOTE: how to choose padding for conv transpose?
-        self.deconv = nn.ConvTranspose2d(
-            out_channels, out_channels, deconv_kernel, stride=deconv_stride,
-            padding=deconv_pad, output_padding=deconv_out_pad, bias=False)
-        # self.deconv = nn.UpsamplingBilinear2d(scale_factor=2)
-        self.bn_deconv = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-
-        # default behavior, initialize weights to bilinear upsampling
-        # TF CenterNet does not do this
-        if init_bilinear:
-            self.init_bilinear_upsampling()
-
-    def forward(self, x):
-        out = self.conv(x)
-        out = self.bn_conv(out)
-        out = self.relu(out)
-
-        out = self.deconv(out)
-        out = self.bn_deconv(out)
-        out = self.relu(out)
-
-        return out
-
-    def init_bilinear_upsampling(self):
-        # initialize convolution transpose layer as bilinear upsampling
-        # https://github.com/ucbdrive/dla/blob/master/dla_up.py#L26-L33
-        w = self.deconv.weight.data
-        f = math.ceil(w.size(2) / 2)
-        c = (2*f - 1 - f%2) / (f*2.)
-        
-        for i in range(w.size(2)):
-            for j in range(w.size(3)):
-                w[0,0,i,j] = (1 - math.fabs(i/f - c)) * (1 - math.fabs(j/f - c))
-        
-        for c in range(1, w.size(0)):
-            w[c,0,:,:] = w[0,0,:,:]
-
-class SimpleBackbone(nn.Module):
-    """ResNet/MobileNet with upsample stage (first proposed in PoseNet https://arxiv.org/abs/1804.06208)
-    """
-    # Reference implementations
-    # CenterNet: https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
-    # Original: https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
-    # TensorFlow: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_re.py
-    # upsample parameters (channels and kernels) are from CenterNet
-
-    def __init__(
-        self, 
-        downsample: nn.Module, 
-        downsample_out_channels: int, 
-        upsample_channels=[256, 128, 64],
-        upsample_kernels=[4, 4, 4],
-        upsample_init_bilinear: bool=True
-        ):
-        super(SimpleBackbone, self).__init__()
-        self.downsample = downsample
-
-        # build upsample stage
-        upsample_layers = []
-        up_layer = UpsampleBlock(
-            downsample_out_channels, upsample_channels[0],
-            deconv_kernel=upsample_kernels[0], init_bilinear=upsample_init_bilinear
-        )
-        upsample_layers.append(up_layer)
-
-        for i in range(1, len(upsample_channels)):
-            up_layer = UpsampleBlock(
-                upsample_channels[i-1], upsample_channels[i], deconv_kernel=upsample_kernels[i], 
-                init_bilinear=upsample_init_bilinear
-            )
-            upsample_layers.append(up_layer)
-
-        self.upsample = nn.Sequential(*upsample_layers)
-
-        self.out_channels = upsample_channels[-1]
-
-    def forward(self, x):
-        out = self.downsample(x)
-        out = self.upsample(out)
-
-        return out
-
-def simple_resnet_backbone(resnet_name, pretrained=True, upsample_init_bilinear=True):
-    backbone = resnet.__dict__[resnet_name](pretrained=pretrained)
-    downsample = nn.Sequential(
-        nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
-        backbone.layer1,
-        backbone.layer2,
-        backbone.layer3,
-        backbone.layer4
-    )
-    last_channels = _resnet_channels[resnet_name][-1]
-
-    return SimpleBackbone(downsample, last_channels, upsample_init_bilinear=upsample_init_bilinear)
-
-def simple_mobilenet_backbone(mobilenet_name, pretrained=True, upsample_init_bilinear=True):
-    backbone = mobilenet.__dict__[mobilenet_name](pretrained=pretrained)
-    downsample = backbone.features
-    last_channels = _mobilenet_channels[mobilenet_name][-1]
-
-    return SimpleBackbone(downsample, last_channels, upsample_init_bilinear=upsample_init_bilinear)
-
-class FPNBackbone(nn.Module):
-    """
-    """
-    # Reference implementation: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_resnet_v1_fpn_feature_extractor.py
-    # Note that this is different from the original FPN
-    # 1. this only uses the last feature map from FPN
-    # 2. top down path uses different number of channels, thus a conv layer is required after merging with lateral skip connection
-    def __init__(
-        self, 
-        bottom_up: nn.ModuleList,
-        bottom_up_channels: Iterable[int],
-        top_down_channels: Iterable[int]=[256, 128, 64]
-        ):
-        """
-            bottom_up_channels list from bottom to top (forward pass of the backbone)
-            top_down_channels list from top to bottom (forward pass of the FPN)
-        """
-        super(FPNBackbone, self).__init__()
-        self.bottom_up = bottom_up
-        
-        self.lateral_projections = nn.ModuleList()
-        self.top_down_convs = nn.ModuleList()
-
-        for i in range(len(top_down_channels)):
-            in_channels = bottom_up_channels[-2-i]
-            out_channels = top_down_channels[i]
-
-            # 1x1 conv to match number of channels
-            if in_channels == out_channels:
-                lateral_conv = nn.Identity()
-            else:
-                lateral_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)
-            
-            if i == len(top_down_channels) - 1:
-                next_channels = top_down_channels[-1]
-            else:
-                next_channels = top_down_channels[i+1]
-            output_conv = nn.Sequential(
-                nn.Conv2d(out_channels, next_channels, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(next_channels),
-                nn.ReLU()
-            )
-
-            self.lateral_projections.append(lateral_conv)
-            self.top_down_convs.append(output_conv)
-
-        # 1x1 conv to change number of channels at the top
-        if bottom_up_channels[-1] != top_down_channels[0]:
-            self.top_project = nn.Conv2d(bottom_up_channels[-1], top_down_channels[0], kernel_size=1, stride=1)
-        else:
-            self.top_project = nn.Identity()
-        self.out_channels = top_down_channels[-1]
-
-    def forward(self, x):
-        # bottom up path. save feature maps in a list for lateral connections later
-        bottom_up_features = [self.bottom_up[0](x)]
-
-        for i in range(1, len(self.bottom_up)):
-            next_feature = self.bottom_up[i](bottom_up_features[-1])
-            bottom_up_features.append(next_feature)
-
-        # feature at pyramid top. 1x1 conv 
-        out = self.top_project(bottom_up_features[-1])
-
-        # top down path
-        for i in range(len(self.lateral_projections)):
-            out = F.interpolate(out, scale_factor=2, mode="nearest")            # scale up
-            lateral = self.lateral_projections[i](bottom_up_features[-2-i])     # lateral skip connection
-            
-            out = out + lateral                 # merge
-            out = self.top_down_convs[i](out)   # conv block
-
-        return out
-
-def fpn_resnet_backbone(resnet_name, pretrained=True):
-    backbone = resnet.__dict__[resnet_name](pretrained=pretrained)
-    bottom_up = nn.ModuleList([
-        nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
-        backbone.layer1,
-        backbone.layer2,
-        backbone.layer3,
-        backbone.layer4
-    ])
-    bottom_up_channels = _resnet_channels[resnet_name]
-
-    return FPNBackbone(bottom_up, bottom_up_channels)
-
-
-def fpn_mobilenet_backbone(mobilenet_name, pretrained=True):
-    # conv with stride = 2 (downsample) will be the first layer of each stage
-    # this is to ensure that at each stage, it is the most refined feature map at that re
-    # https://github.com/pytorch/vision/blob/master/torchvision/models/detection/backbone_utils.py
-    backbone = mobilenet.__dict__[mobilenet_name](pretrained=pretrained)
-    features = backbone.features
-    bottom_up = nn.ModuleList()
-
-    stage = [features[0]]
-    for i in range(1, len(features)-1):
-        if features[i]._is_cn:      # stride = 2, start of a new stage
-            bottom_up.append(nn.Sequential(*stage))
-            stage = [features[i]]
-        else:
-            stage.append(features[i])
-    stage.append(features[-1])      # include last conv layer in the last stage
-    bottom_up.append(nn.Sequential(*stage))
-    
-    bottom_up_channels = _mobilenet_channels[mobilenet_name]
-
-    return FPNBackbone(bottom_up, bottom_up_channels)
+_supported_heads = ["size", "offset"]
+_output_head_channels = {
+    "size": 2,
+    "offset": 2
+}
 
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
     """
-    supported_heads = ["size", "offset"]
-    output_head_channels = {
-        "size": 2,
-        "offset": 2
-    }
-
     def __init__(
-        self, 
-        backbone: nn.Module, 
-        num_classes: int, 
-        other_heads: Iterable[str]=["size", "offset"], 
-        loss_weights: Dict[str,float]=dict(size=1, offset=1),
-        heatmap_bias: float=-2.19,
-        max_pool_kernel: int=3,
-        num_detections: int=40,
-        batch_size: int=4,
-        optimizer: str="adam",
-        lr: float=1e-3
+        self,
+        num_classes: int,
+        backbone: Dict = None, 
+        output_heads: Dict = None,
+        batch_size: int = 4,
+        learning_rate: float = 1e-3,
+        **kwargs
         ):
         super(CenterNet, self).__init__()
-        self.backbone = backbone
-        feature_channels = backbone.out_channels
+
+        self.backbone = build_backbone(backbone)        
+        backbone_channels = backbone.out_channels
+        
         self.num_classes = num_classes
-        self.optimizer_name = optimizer
+
+        heatmap_bias = output_heads["heatmap_bias"]
+        other_heads = output_heads["other_heads"]
+        loss_weights = output_heads["loss_weights"]
 
         # for heatmap output, fill a pre-defined bias value
         # for other outputs, fill bias with 0 to match identity mapping (from centernet)
         self.output_heads = nn.ModuleDict()
-        self.output_heads["heatmap"] = self._make_output_head(feature_channels, num_classes, fill_bias=heatmap_bias)
+        self.output_heads["heatmap"] = self._make_output_head(
+            backbone_channels,
+            num_classes,
+            fill_bias=heatmap_bias
+        )
 
         for h in other_heads:
-            assert h in self.supported_heads
-            self.output_heads[h] = self._make_output_head(feature_channels, self.output_head_channels[h], fill_bias=0)
+            assert h in _supported_heads
+            assert h in loss_weights
+            self.output_heads[h] = self._make_output_head(
+                backbone_channels,
+                _output_head_channels[h],
+                fill_bias=0
+            )
         self.other_heads = other_heads
-
-        # loss weights are used to calculated total weighted loss
-        for x in other_heads:
-            assert x in loss_weights
         self.loss_weights = loss_weights   
         
         # parameterized focal loss for heatmap
         self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)
 
-        # for detection decoding
-        # this is used to mimic nms
-        self.nms_max_pool = nn.MaxPool2d(max_pool_kernel, stride=1, padding=(max_pool_kernel-1)//2)     # same padding
-        self.num_detections = num_detections
+        # calculate stride of output map
+        sample_inputs = torch.rand((4,3,512,512))
+        sample_outputs = self(sample_inputs)
+        self.output_stride = sample_inputs.shape[-1] // sample_outputs.shape[-1]
 
         # for pytorch lightning tuner
         self.batch_size = batch_size
-        self.learning_rate = lr
+        self.learning_rate = learning_rate
 
-    def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float=None):
+    def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float = None):
         # Reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
         conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        relu = nn.ReLU()
+        relu = nn.ReLU(inplace=True)
         conv2 = nn.Conv2d(in_channels, out_channels, 1)
 
         if fill_bias != None:
@@ -358,9 +107,9 @@ class CenterNet(pl.LightningModule):
 
         features = self.backbone(img)
         output = {}
-        output["backbone_features"] = features
-        for k,v in self.output_heads.items():
-            # k is head name, v is that head nn.Module
+        output["backbone_features"] = features      # for logging purpose
+        
+        for k, v in self.output_heads.items():
             output[k] = v(features)
         
         return output
@@ -368,31 +117,25 @@ class CenterNet(pl.LightningModule):
     def compute_loss(self, output_maps: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
         """Return a dictionary of losses for each output head. This method is called during the training step
         """
-        bboxes = targets["bboxes"].clone()               # ND4
-        labels = targets["labels"]               # ND
-        mask = targets["mask"].unsqueeze(-1)     # add column dimension to support broadcasting
+        bboxes = targets["bboxes"]              # ND4
+        labels = targets["labels"]              # ND
+        mask = targets["mask"].unsqueeze(-1)    # add column dimension to support broadcasting
 
         heatmap = output_maps["heatmap"]
-        batch_size, channels, output_h, output_w = heatmap.shape
+        batch_size, _, out_h, out_w = heatmap.shape
 
         size_map = output_maps["size"].view(batch_size, 2, -1)      # flatten last xy dimensions
         offset_map = output_maps["offset"].view(batch_size, 2, -1)  # for torch.gather() later
 
         # initialize losses to 0
-        losses = {
-            "heatmap": torch.tensor(0., dtype=torch.float32, device=self.device)
-        }
+        losses = {}
 
-        centers = bboxes[:,:,:2].clone()    # x and y, relative scale
-        true_wh = bboxes[:,:,2:]            # w and h, relative scale
-
-        centers[:,:,0] *= output_w      # convert to absolute scale
-        centers[:,:,1] *= output_h
-        centers_int = centers.long()    # convert to integer to use as index
+        bboxes = bboxes.clone() / self.output_stride    # convert input coordinates to output coordinates
+        centers_int = bboxes[...,0].long()              # convert to integer to use as index
 
         # combine xy indices for torch.gather()
         # repeat indices using .expand() to gather on 2 channels
-        xy_indices = centers_int[:,:,1] * output_w + centers_int[:,:,0]     # y * w + x
+        xy_indices = centers_int[...,1] * out_h + centers_int[...,0]        # y * w + x
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
         pred_sizes = torch.gather(size_map, dim=-1, index=xy_indices)       # N2D
@@ -401,24 +144,19 @@ class CenterNet(pl.LightningModule):
         # need to swapaxes since pred_size is N2D but true_wh is ND2
         # use the mask to ignore none detections due to padding
         # NOTE: author noted that l1 loss is better than smooth l1 loss
-        size_loss = F.l1_loss(pred_sizes.swapaxes(1,2), true_wh, reduction="none")
+        size_loss = F.l1_loss(pred_sizes.swapaxes(1,2), bboxes[...,2:], reduction="none")
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
-        # NOTE: offset is in absolute scale (float number) of output heatmap
-        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), centers - torch.floor(centers), reduction="none")
+        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), bboxes[...,:2] - torch.floor(bboxes[...,:2]), reduction="none")
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
+        losses["heatmap"] = torch.tensor(0., dtype=torch.float32, device=self.device)
         for b in range(batch_size):
-            # convert wh to absolute scale
-            abs_wh = true_wh[b].clone()
-            abs_wh[:,0] *= output_w
-            abs_wh[:,1] *= output_h
-
             # render target heatmap and accumulate focal loss
             target_heatmap = render_target_heatmap(
-                heatmap.shape[1:], centers_int[b], abs_wh, 
+                heatmap.shape[1:], centers_int[b], bboxes[...,:2], 
                 labels[b], mask[b], device=self.device)
             losses["heatmap"] += self.focal_loss(heatmap[b], target_heatmap)
 
@@ -430,51 +168,46 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, encoded_output: Dict[str, torch.Tensor], num_detections: int=None):
+    def decode_detections(self, encoded_output: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3):
         """Decode model output to detections
         """
         # reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
-        if num_detections == None:
-            num_detections = self.num_detections
-
-        batch_size, channels, height, width = encoded_output["heatmap"].shape
+        batch_size, _, out_h, out_w = encoded_output["heatmap"].shape
         heatmap = encoded_output["heatmap"]
         size_map = encoded_output["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
         offset_map = encoded_output["offset"].view(batch_size, 2, -1)
 
         # obtain topk from heatmap
-        heatmap = torch.sigmoid(encoded_output["heatmap"])  # convert to probability NOTE: is this necessary? sigmoid is a monotonic increasing function. max order will be preserved
-        nms_mask = (heatmap == self.nms_max_pool(heatmap))  # pseudo-nms, only consider local peaks
+        # heatmap = torch.sigmoid(encoded_output["heatmap"])  # convert to probability NOTE: is this necessary? sigmoid is a monotonic increasing function. max order will be preserved
+        
+        local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
+        nms_mask = (heatmap == local_peaks)  # pseudo-nms, only consider local peaks
         heatmap = nms_mask.float() * heatmap
 
         # flatten to N(CHW) to apply topk
         heatmap = heatmap.view(batch_size, -1)
         topk_scores, topk_indices = torch.topk(heatmap, num_detections)
+        topk_scores = torch.sigmoid(topk_scores)
 
         # restore flattened indices to class, xy indices
-        topk_c_indices = topk_indices // (height*width)
-        topk_xy_indices = topk_indices % (height*width)
-        topk_y_indices = topk_xy_indices // width
-        topk_x_indices = topk_xy_indices % width
+        topk_classes = topk_indices // (out_h*out_w)
+        topk_xy_indices = topk_indices % (out_h*out_w)
+        topk_y_indices = topk_xy_indices // out_w
+        topk_x_indices = topk_xy_indices % out_w
 
         # extract bboxes at topk xy positions
-        # bbox wh are already in relative scale
-        # bbox xy offset are in absolute scale of output heatmap
+        topk_x = topk_x_indices + torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
+        topk_y = topk_y_indices + torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
         topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices)
         topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices)
-        topk_x_offset = torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
-        topk_y_offset = torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
 
-        topk_x = (topk_x_indices + topk_x_offset) / width
-        topk_y = (topk_y_indices + topk_y_offset) / height
-
-        bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
+        topk_bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
-            "labels": topk_c_indices,
-            "bboxes": bboxes,
+            "labels": topk_classes,
+            "bboxes": topk_bboxes,
             "scores": topk_scores
         }
         return out
@@ -528,15 +261,15 @@ class CenterNet(pl.LightningModule):
             tp += x["tp"]
             fp += x["fp"]
         
-        class_ap = tp / (tp + fp + 1e-6)
-        mean_ap = np.average(class_ap)
+        precision = tp / (tp + fp + 1e-6)
+        precision = np.average(precision)
 
-        for i in range(class_ap.shape[0]):
-            self.log(f"AP50/class_{i:02d}", class_ap[i])
+        for i in range(precision.shape[0]):
+            self.log(f"precision@50IoU/class_{i:02d}", precision[i])
         
-        self.log("val/AP50_person", class_ap[0])
-        self.log("val/AP50_car", class_ap[2])
-        self.log("val/AP50", mean_ap)
+        self.log("val/precision@50IoU_person", precision[0])
+        self.log("val/precision@50IoU_car", precision[2])
+        self.log("val/precision@50IoU", precision)
 
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
@@ -574,17 +307,27 @@ class CenterNet(pl.LightningModule):
         for i in range(N_samples):
             draw_bboxes(
                 samples[i], pred_bboxes[i], pred_labels[i], pred_scores[i], 
-                inplace=True, relative_scale=True, color=RED)
+                inplace=True, relative_scale=True, color=Color.RED)
     
             draw_bboxes(
                 samples[i], target_bboxes[i], target_labels[i], 
-                inplace=True, relative_scale=True, color=BLUE)
+                inplace=True, relative_scale=True, color=Color.BLUE)
 
         return samples
 
+    def register_optimizer(self, optimizer_cfg: Dict):
+        assert optimizer_cfg["name"] in _optimizer_mapper
+        self.optimizer_cfg = optimizer_cfg
+
     # lightning method
     def configure_optimizers(self):
-        optimizer_algo = _optimizer_mapper.get(self.optimizer_name, torch.optim.Adam)
-        optimizer = optimizer_algo(self.parameters(), lr=self.learning_rate)
+        if self.optimizer_cfg == None:
+            warnings.warn("Optimizer config was not specified. Using adam optimizer with lr=1e-3")
+            optimizer_params = dict(lr=1e-3)
+            self.optimizer_cfg = dict(name="adam", params=optimizer_params)
+
+        optimizer_algo = _optimizer_mapper[self.optimizer_cfg["name"]]
+        optimizer = optimizer_algo(self.parameters(), **self.optimizer_cfg["params"])
+        
         # lr scheduler
         return optimizer
