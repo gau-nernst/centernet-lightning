@@ -509,15 +509,17 @@ class CenterNet(pl.LightningModule):
         pred_detections = self.decode_detections(encoded_output, num_detections=50)
         class_tp, class_fp = self.evaluate_batch(pred_detections, batch)
         
+        result = {
+            "tp": class_tp,
+            "fp": class_fp,
+        }
+
+        # return these for logging image callback
         if batch_idx == 0:
-            # return these for logging image callback
-            result = {
-                "tp": class_tp,
-                "fp": class_fp,
-                "detections": pred_detections,
-                "encoded_output": encoded_output
-            }
-            return result
+            result["detections"] = pred_detections
+            result["encoded_output"] = encoded_output
+    
+        return result
 
     def validation_epoch_end(self, outputs):
         tp = np.zeros(self.num_classes, dtype=np.float32)
@@ -535,15 +537,6 @@ class CenterNet(pl.LightningModule):
         self.log("val/AP50_person", class_ap[0])
         self.log("val/AP50_car", class_ap[2])
         self.log("val/AP50", mean_ap)
-
-    def test_step(self, batch, batch_idx):
-        encoded_output = self(batch)
-        losses = self.compute_loss(encoded_output, batch)
-
-        pred_detections = self.decode_detections(encoded_output)
-        ap50, ar50 = self.evaluate_batch(pred_detections, batch)
-        self.log("test_ap50", ap50)
-        self.log("test_ar50", ar50)
 
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
