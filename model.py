@@ -265,12 +265,12 @@ class CenterNet(pl.LightningModule):
         ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
         mAP = np.average(ap)                    # average over classes to get mAP
 
-        for i in range(precision.shape[0]):
-            self.log(f"AP50/class_{i:02d}", precision[i])
+        for i, class_ap in enumerate(ap):
+            self.log(f"AP50/class_{i:02d}", class_ap)
         
-        self.log("val/mAP50", precision)
-        self.log("val/AP50_person", precision[1])
-        self.log("val/AP50_car", precision[3])
+        self.log("val/mAP50", mAP)
+        self.log("val/AP50_person", ap[1])
+        self.log("val/AP50_car", ap[3])
 
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], detection_threshold: float = 0.5):

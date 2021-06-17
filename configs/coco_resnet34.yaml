@@ -11,9 +11,9 @@ model:
   num_classes: 81
   output_heads:
     other_heads: [size, offset]
-    heatmap_bias: -4.595
+    heatmap_bias: -2.19
     loss_weights:
-      size: 1
+      size: 0.1
       offset: 1
 
   optimizer:
@@ -65,7 +65,8 @@ trainer:
     gpus: 1
     precision: 16
     max_epochs: 1
-    val_check_interval: 0.5
+    limit_val_batches: 20
+    val_check_interval: 0.1
     benchmark: True
 
   logger:

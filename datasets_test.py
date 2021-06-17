@@ -31,6 +31,10 @@ class TestDatasets:
         bboxes = sample["bboxes"]
         for box in bboxes:
             assert len(box) == 4
+            assert 0 < box[0] <= 512
+            assert 0 < box[1] <= 512
+            assert 0 < box[2] <= 512
+            assert 0 < box[3] <= 512
         
         labels = sample["labels"]
         assert len(bboxes) == len(labels)

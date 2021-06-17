@@ -32,7 +32,7 @@ class TestModels:
             assert not torch.isnan(torch.sum(output[x]))
         
         # correct output dimension
-        assert output["heatmap"].shape == (4,78,128,128)
+        assert output["heatmap"].shape == (4,81,128,128)
         assert output["size"].shape == (4,2,128,128)
         assert output["offset"].shape == (4,2,128,128)
     

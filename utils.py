@@ -46,7 +46,15 @@ def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=True):
 
     return bboxes
 
-def draw_bboxes(img: np.ndarray, bboxes: np.ndarray, labels: np.ndarray, scores: np.ndarray=None, inplace: bool=True, relative_scale: bool=False, color=(255,0,0)):
+def draw_bboxes(
+    img: np.ndarray,
+    bboxes: np.ndarray,
+    labels: np.ndarray,
+    scores: np.ndarray = None,
+    inplace: bool = True,
+    relative_scale: bool = False,
+    color = (255,0,0)
+    ):
     """Draw bounding boxes on an image using `cv2`
     
     Args:
@@ -146,7 +154,7 @@ class LogImageCallback(pl.Callback):
                 )
             
             # log output heatmap and backbone output
-            encoded_output: Dict[str, torch.Tensor] = outputs["encoded_output"]
+            encoded_output = outputs["encoded_output"]
             pred_heatmap        = encoded_output["heatmap"][:self.num_samples].float().cpu()
             pred_heatmap        = torch.sigmoid(pred_heatmap)                   # convert to probability
             pred_heatmap, _     = torch.max(pred_heatmap, dim=1)                # max aggregate across classes/channels

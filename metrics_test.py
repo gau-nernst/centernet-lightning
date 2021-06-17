@@ -69,8 +69,3 @@ class TestMetrics:
             "labels": np.expand_dims(self.target_labels, 0),
         }
 
-        ap50, ar50 = class_tpfp_batch(detections, detections, self.num_classes)
-        assert ap50 == 1
-        assert ar50 == 1
-
-        ap50, ar50 = class_tpfp_batch(detections, targets, self.num_classes)
