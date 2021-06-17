@@ -2,6 +2,7 @@ from typing import Dict, Iterable
 import warnings
 import math
 
+import torch
 from torch import nn
 import torchvision.models.resnet as resnet
 import torchvision.models.mobilenet as mobilenet
@@ -183,6 +184,12 @@ class SimpleBackbone(nn.Module):
 
         return out
 
+    @property
+    def output_stride(self):
+        sample_input = torch.rand((4,3,512,512))
+        sample_output = self(sample_input)
+        return sample_input.shape[-1] // sample_output.shape[-1]
+
 def build_simple_backbone(name: str, pretrained: bool = True, **kwargs):
     if name.startswith("resnet"):
         resnet_stages = get_resnet_stages(name, pretrained)
@@ -269,6 +276,12 @@ class FPNBackbone(nn.Module):
             out = self.conv_upsample_layers[i](out) + skip
 
         return out
+
+    @property
+    def output_stride(self):
+        sample_input = torch.rand((4,3,512,512))
+        sample_output = self(sample_input)
+        return sample_input.shape[-1] // sample_output.shape[-1]
 
 def build_fpn_backbone(name: str, pretrained: str = True, **kwargs):
     if name.startswith("resnet"):

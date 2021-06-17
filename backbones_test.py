@@ -17,6 +17,7 @@ class TestSimpleBackbone:
             
             output = backbone(sample_input)
             assert output.shape == (4,64,128,128)
+            assert backbone.output_stride == 4
 
 class TestFPNBackbone:
     
@@ -27,6 +28,7 @@ class TestFPNBackbone:
             
             output = backbone(sample_input)
             assert output.shape == (4,64,128,128)
+            assert backbone.output_stride == 4
 
 class TestWithConfig:
     pass
