@@ -15,13 +15,24 @@ def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
     return bboxes
 
 def convert_cxcywh_to_xywh(bboxes: np.ndarray, inplace=True):
-    """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
+    """Convert bboxes from cxcywh format to xywh format. Default is inplace
     """
     if not inplace:
         bboxes = bboxes.copy()
     
-    bboxes[...,0] -= bboxes[...,2] / 2    # x1 = cx - w/2
-    bboxes[...,1] -= bboxes[...,3] / 2    # y1 = cy - h/2
+    bboxes[...,0] -= bboxes[...,2] / 2      # x = cx - w/2
+    bboxes[...,1] -= bboxes[...,3] / 2      # y = cy - h/2
+
+    return bboxes
+
+def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=True):
+    """Convert bboxes from xywh format to cxcywh format. Default is inplace
+    """
+    if not inplace:
+        bboxes = bboxes.copy()
+
+    bboxes[...,0] += bboxes[...,2] / 2      # cx = x + w/2
+    bboxes[...,1] += bboxes[...,3] / 2      # cy = y + h/2
 
     return bboxes
 
