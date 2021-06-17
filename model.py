@@ -1,6 +1,7 @@
-from typing import Dict, Iterable, List
+import os
+import yaml
+from typing import Dict, Union
 from enum import Enum
-from copy import deepcopy
 import warnings
 
 import numpy as np
@@ -12,7 +13,7 @@ import pytorch_lightning as pl
 from backbones import build_backbone
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import class_tpfp_batch
-from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes, draw_heatmap
+from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes
 
 _optimizer_mapper = {
     "sgd": torch.optim.SGD,
@@ -45,8 +46,8 @@ class CenterNet(pl.LightningModule):
         ):
         super(CenterNet, self).__init__()
 
-        self.backbone = build_backbone(backbone)        
-        backbone_channels = backbone.out_channels
+        self.backbone = build_backbone(**backbone)        
+        backbone_channels = self.backbone.out_channels
         
         self.num_classes = num_classes
 
@@ -77,10 +78,8 @@ class CenterNet(pl.LightningModule):
         # parameterized focal loss for heatmap
         self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)
 
-        # calculate stride of output map
-        sample_inputs = torch.rand((4,3,512,512))
-        sample_outputs = self(sample_inputs)
-        self.output_stride = sample_inputs.shape[-1] // sample_outputs.shape[-1]
+        # get output stride from the backbone (how much input image is downsampled)
+        self.output_stride = self.backbone.output_stride
 
         # for pytorch lightning tuner
         self.batch_size = batch_size
@@ -131,11 +130,11 @@ class CenterNet(pl.LightningModule):
         losses = {}
 
         bboxes = bboxes.clone() / self.output_stride    # convert input coordinates to output coordinates
-        centers_int = bboxes[...,0].long()              # convert to integer to use as index
+        centers_int = bboxes[...,:2].long()              # convert to integer to use as index
 
         # combine xy indices for torch.gather()
         # repeat indices using .expand() to gather on 2 channels
-        xy_indices = centers_int[...,1] * out_h + centers_int[...,0]        # y * w + x
+        xy_indices = centers_int[...,1] * out_w + centers_int[...,0]        # y * w + x
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
         pred_sizes = torch.gather(size_map, dim=-1, index=xy_indices)       # N2D
@@ -148,7 +147,8 @@ class CenterNet(pl.LightningModule):
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
-        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), bboxes[...,:2] - torch.floor(bboxes[...,:2]), reduction="none")
+        target_offset = bboxes[...,:2] - torch.floor(bboxes[...,:2])
+        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), target_offset, reduction="none")
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
@@ -156,8 +156,9 @@ class CenterNet(pl.LightningModule):
         for b in range(batch_size):
             # render target heatmap and accumulate focal loss
             target_heatmap = render_target_heatmap(
-                heatmap.shape[1:], centers_int[b], bboxes[...,:2], 
-                labels[b], mask[b], device=self.device)
+                heatmap.shape[1:], centers_int[b], bboxes[b,:,:2], 
+                labels[b], mask[b], device=self.device
+            )
             losses["heatmap"] += self.focal_loss(heatmap[b], target_heatmap)
 
         # average over number of detections
@@ -331,3 +332,21 @@ class CenterNet(pl.LightningModule):
         
         # lr scheduler
         return optimizer
+
+def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
+    """Build CenterNet from a confile file.
+
+    Args:
+        cfg_file (str or dict): Config file to build CenterNet, either path to the config file, or a config file dictionary
+    """
+    if type(cfg_file) == str:
+        assert os.path.exists(cfg_file), "Config file does not exist"
+        with open(cfg_file, "r", encoding="utf-8") as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+            params = config["model"]
+
+    else:
+        params = cfg_file
+
+    model = CenterNet(**params)
+    return model
