@@ -37,11 +37,16 @@ class FocalLossWithLogits(nn.Module):
         return loss
 
 def render_target_heatmap(
-    shape: Iterable, centers: torch.Tensor, sizes: torch.Tensor, 
-    indices: torch.Tensor, mask: torch.Tensor, 
-    alpha: float=0.54, device: str="cpu", eps=1e-8
+    shape: Iterable,
+    centers: torch.Tensor,
+    sizes: torch.Tensor, 
+    indices: torch.Tensor,
+    mask: torch.Tensor, 
+    alpha: float=0.54,
+    device: str="cpu",
+    eps=1e-8
     ):
-    """Render target heatmap using Gaussian kernel from detections' bounding boxes
+    """Render target heatmap using Gaussian kernel from detections' bounding boxes. Using TTFNet method
 
     Reference implementation https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L241
     """
@@ -50,11 +55,11 @@ def render_target_heatmap(
     box_h = sizes[:,1]
     indices = indices.long()
 
-    # TTFNet. add 1e-4 to variance to avoid division by zero
-    std_w = alpha*box_w/6
-    std_h = alpha*box_h/6
-    var_w = std_w*std_w
-    var_h = std_h*std_h
+    # From TTFNet
+    std_w = alpha * box_w / 6
+    std_h = alpha * box_h / 6
+    var_w = std_w * std_w
+    var_h = std_h * std_h
 
     # a matrix of (x,y)
     grid_y, grid_x = torch.meshgrid([
@@ -65,7 +70,7 @@ def render_target_heatmap(
     # iterate over the detections
     for i, m in enumerate(mask):
         if m == 0:
-            break
+            continue
         x = centers[i][0]
         y = centers[i][1]
         idx = indices[i]
@@ -74,7 +79,6 @@ def render_target_heatmap(
         radius_sq = (x - grid_x)**2 / (2*var_w[i] + eps) + (y - grid_y)**2 / (2*var_h[i] + eps)
         gaussian_kernel = torch.exp(-radius_sq)
         gaussian_kernel[y, x] = 1       # force the center to be 1
-        # apply mask to ignore none detections from padding
         heatmap[idx] = torch.maximum(heatmap[idx], gaussian_kernel)
 
     return heatmap
