@@ -4,6 +4,6 @@ scratchpad.ipynb
 lightning_logs/
 datasets
 wandb/
-.wandb_key
+.env
 .idea
 *results.json

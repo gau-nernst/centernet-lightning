@@ -1,7 +1,6 @@
 import os
 import yaml
 from typing import Dict, Union
-from enum import Enum
 import warnings
 
 import numpy as np
@@ -13,18 +12,7 @@ import pytorch_lightning as pl
 from backbones import build_backbone
 from losses import FocalLossWithLogits, render_target_heatmap
 from metrics import class_tpfp_batch
-from utils import convert_cxcywh_to_x1y1x2y2, draw_bboxes
-
-_optimizer_mapper = {
-    "sgd": torch.optim.SGD,
-    "adam": torch.optim.Adam,
-    "adamw": torch.optim.AdamW,
-    "rmsprop": torch.optim.RMSprop
-}
-
-class Color(Enum):
-    RED = (1., 0., 0.)
-    BLUE = (0., 0., 1.)
+from utils import convert_cxcywh_to_x1y1x2y2
 
 _supported_heads = ["size", "offset"]
 _output_head_channels = {
@@ -37,22 +25,24 @@ class CenterNet(pl.LightningModule):
     """
     def __init__(
         self,
+        backbone: Dict, 
         num_classes: int,
-        backbone: Dict = None, 
         output_heads: Dict = None,
-        batch_size: int = 4,
-        learning_rate: float = 1e-3,
+        optimizer: Dict = None,
+        lr_scheduler: Dict = None,
         **kwargs
         ):
         super(CenterNet, self).__init__()
 
         self.backbone = build_backbone(**backbone)        
         backbone_channels = self.backbone.out_channels
+        self.output_stride = self.backbone.output_stride    # how much input image is downsampled
         
         self.num_classes = num_classes
+        self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)    # parameterized focal loss for heatmap
 
         heatmap_bias = output_heads["heatmap_bias"]
-        other_heads = output_heads["other_heads"]
+        other_heads  = output_heads["other_heads"]
         loss_weights = output_heads["loss_weights"]
 
         # for heatmap output, fill a pre-defined bias value
@@ -67,23 +57,20 @@ class CenterNet(pl.LightningModule):
         for h in other_heads:
             assert h in _supported_heads
             assert h in loss_weights
-            self.output_heads[h] = self._make_output_head(
+            head = self._make_output_head(
                 backbone_channels,
                 _output_head_channels[h],
                 fill_bias=0
             )
-        self.other_heads = other_heads
+            self.output_heads[h] = head
+        
+        self.other_heads  = other_heads
         self.loss_weights = loss_weights   
         
-        # parameterized focal loss for heatmap
-        self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)
+        self.optimizer_cfg    = optimizer
+        self.lr_scheduler_cfg = lr_scheduler
 
-        # get output stride from the backbone (how much input image is downsampled)
-        self.output_stride = self.backbone.output_stride
-
-        # for pytorch lightning tuner
-        self.batch_size = batch_size
-        self.learning_rate = learning_rate
+        self.save_hyperparameters()
 
     def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float = None):
         # Reference implementations
@@ -118,7 +105,7 @@ class CenterNet(pl.LightningModule):
         """
         bboxes = targets["bboxes"]              # ND4
         labels = targets["labels"]              # ND
-        mask = targets["mask"].unsqueeze(-1)    # add column dimension to support broadcasting
+        mask   = targets["mask"].unsqueeze(-1)  # add column dimension to support broadcasting
 
         heatmap = output_maps["heatmap"]
         batch_size, _, out_h, out_w = heatmap.shape
@@ -137,7 +124,7 @@ class CenterNet(pl.LightningModule):
         xy_indices = centers_int[...,1] * out_w + centers_int[...,0]        # y * w + x
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
-        pred_sizes = torch.gather(size_map, dim=-1, index=xy_indices)       # N2D
+        pred_sizes  = torch.gather(size_map, dim=-1, index=xy_indices)      # N2D
         pred_offset = torch.gather(offset_map, dim=-1, index=xy_indices)    # N2D
 
         # need to swapaxes since pred_size is N2D but true_wh is ND2
@@ -156,8 +143,12 @@ class CenterNet(pl.LightningModule):
         for b in range(batch_size):
             # render target heatmap and accumulate focal loss
             target_heatmap = render_target_heatmap(
-                heatmap.shape[1:], centers_int[b], bboxes[b,:,:2], 
-                labels[b], mask[b], device=self.device
+                heatmap.shape[1:],
+                centers_int[b],
+                bboxes[b,:,:2], 
+                labels[b],
+                mask[b],
+                device=self.device
             )
             losses["heatmap"] += self.focal_loss(heatmap[b], target_heatmap)
 
@@ -177,8 +168,8 @@ class CenterNet(pl.LightningModule):
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
         batch_size, _, out_h, out_w = encoded_output["heatmap"].shape
-        heatmap = encoded_output["heatmap"]
-        size_map = encoded_output["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
+        heatmap    = encoded_output["heatmap"]
+        size_map   = encoded_output["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
         offset_map = encoded_output["offset"].view(batch_size, 2, -1)
 
         # obtain topk from heatmap
@@ -194,10 +185,10 @@ class CenterNet(pl.LightningModule):
         topk_scores = torch.sigmoid(topk_scores)
 
         # restore flattened indices to class, xy indices
-        topk_classes = topk_indices // (out_h*out_w)
+        topk_classes    = topk_indices // (out_h*out_w)
         topk_xy_indices = topk_indices % (out_h*out_w)
-        topk_y_indices = topk_xy_indices // out_w
-        topk_x_indices = topk_xy_indices % out_w
+        topk_y_indices  = topk_xy_indices // out_w
+        topk_x_indices  = topk_xy_indices % out_w
 
         # extract bboxes at topk xy positions
         topk_x = topk_x_indices + torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
@@ -240,8 +231,16 @@ class CenterNet(pl.LightningModule):
             self.log(f"val/{k}_loss", v)
         self.log("val/total_loss", total_loss)
 
-        pred_detections = self.decode_detections(encoded_output, num_detections=50)
-        class_tp, class_fp = self.evaluate_batch(pred_detections, batch)
+        pred_detections = self.decode_detections(encoded_output, num_detections=100)
+
+        class_tp = np.zeros((11, self.num_classes))
+        class_fp = np.zeros((11, self.num_classes))
+
+        for i in range(11):
+            # detection thresholds 0.0, 0.1, ..., 1.0
+            tp, fp = self.evaluate_batch(pred_detections, batch, detection_threshold=i/10)
+            class_tp[i] = tp
+            class_fp[i] = fp
         
         result = {
             "tp": class_tp,
@@ -256,24 +255,25 @@ class CenterNet(pl.LightningModule):
         return result
 
     def validation_epoch_end(self, outputs):
-        tp = np.zeros(self.num_classes, dtype=np.float32)
-        fp = np.zeros(self.num_classes, dtype=np.float32)
-        for x in outputs:
-            tp += x["tp"]
-            fp += x["fp"]
+        class_tp = np.zeros((11, self.num_classes), dtype=np.float32)
+        class_fp = np.zeros((11, self.num_classes), dtype=np.float32)
+        for batch in outputs:
+            class_tp += batch["tp"]
+            class_fp += batch["fp"]
         
-        precision = tp / (tp + fp + 1e-6)
-        precision = np.average(precision)
+        precision = class_tp / (class_tp + class_fp + 1e-8)
+        ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
+        mAP = np.average(ap)                    # average over classes to get mAP
 
         for i in range(precision.shape[0]):
-            self.log(f"precision@50IoU/class_{i:02d}", precision[i])
+            self.log(f"AP50/class_{i:02d}", precision[i])
         
-        self.log("val/precision@50IoU_person", precision[0])
-        self.log("val/precision@50IoU_car", precision[2])
-        self.log("val/precision@50IoU", precision)
+        self.log("val/mAP50", precision)
+        self.log("val/AP50_person", precision[1])
+        self.log("val/AP50_car", precision[3])
 
     @torch.no_grad()
-    def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
+    def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], detection_threshold: float = 0.5):
         # move to cpu and convert to numpy
         preds = {k: v.cpu().float().numpy() for k,v in preds.items()}
         targets = {k: v.cpu().float().numpy() for k,v in targets.items()}
@@ -282,56 +282,32 @@ class CenterNet(pl.LightningModule):
         convert_cxcywh_to_x1y1x2y2(preds["bboxes"])
         convert_cxcywh_to_x1y1x2y2(targets["bboxes"])
 
-        class_tp, class_fp = class_tpfp_batch(preds, targets, self.num_classes, detection_threshold=0.1)
+        class_tp, class_fp = class_tpfp_batch(preds, targets, self.num_classes, detection_threshold=detection_threshold)
         return class_tp, class_fp
 
-    @torch.no_grad()
-    def draw_sample_images(
-        self, imgs: torch.Tensor, preds: Dict[str, torch.Tensor], 
-        targets: Dict[str, torch.Tensor], N_samples: int=8
-        ):
-        N_samples = min(imgs.shape[0], N_samples)
-
-        samples = imgs[:N_samples].cpu().float().numpy().transpose(0,2,3,1)    # convert NCHW to NHWC
-        samples = np.ascontiguousarray(samples)     # C-contiguous, for opencv
-        # samples = np.ascontiguousarray(samples[:,::2,::2,:])        # fast downsample via resampling  
-
-        target_bboxes = targets["bboxes"].cpu().float().numpy()
-        convert_cxcywh_to_x1y1x2y2(target_bboxes)
-        target_labels = targets["labels"].cpu().numpy().astype(int)
-
-        pred_bboxes = preds["bboxes"].cpu().float().numpy()
-        convert_cxcywh_to_x1y1x2y2(pred_bboxes)
-        pred_labels = preds["labels"].cpu().numpy().astype(int)
-        pred_scores = preds["scores"].cpu().float().numpy()
-
-        for i in range(N_samples):
-            draw_bboxes(
-                samples[i], pred_bboxes[i], pred_labels[i], pred_scores[i], 
-                inplace=True, relative_scale=True, color=Color.RED)
-    
-            draw_bboxes(
-                samples[i], target_bboxes[i], target_labels[i], 
-                inplace=True, relative_scale=True, color=Color.BLUE)
-
-        return samples
-
     def register_optimizer(self, optimizer_cfg: Dict):
-        assert optimizer_cfg["name"] in _optimizer_mapper
         self.optimizer_cfg = optimizer_cfg
+
+    def register_lr_scheduler(self, lr_scheduler_cfg: Dict):
+        self.lr_scheduler_cfg = lr_scheduler_cfg
 
     # lightning method
     def configure_optimizers(self):
         if self.optimizer_cfg == None:
             warnings.warn("Optimizer config was not specified. Using adam optimizer with lr=1e-3")
             optimizer_params = dict(lr=1e-3)
-            self.optimizer_cfg = dict(name="adam", params=optimizer_params)
+            self.optimizer_cfg = dict(name="Adam", params=optimizer_params)
 
-        optimizer_algo = _optimizer_mapper[self.optimizer_cfg["name"]]
+        optimizer_algo = torch.optim.__dict__[self.optimizer_cfg["name"]]
         optimizer = optimizer_algo(self.parameters(), **self.optimizer_cfg["params"])
+
+        if self.lr_scheduler_cfg is None:
+            return optimizer
         
-        # lr scheduler
-        return optimizer
+        lr_scheduler_algo = torch.optim.lr_scheduler.__dict__[self.lr_scheduler_cfg["name"]]
+        lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
+
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
 
 def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
     """Build CenterNet from a confile file.

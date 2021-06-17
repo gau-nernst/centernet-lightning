@@ -1,15 +1,14 @@
 model:
   backbone:
     name: resnet34
-    upsample_channels: 256, 128, 64
+    upsample_channels: [256, 128, 64]
     upsample_block:
-      conv_first: True
       upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
       conv_type: normal                 # normal, separable, dcn
       deconv_kernel: 4                  # only used with conv_transpose
       init_bilinear: True               # only used with conv_transpose
   
-  num_classes: 78
+  num_classes: 81
   output_heads:
     other_heads: [size, offset]
     heatmap_bias: -4.595
@@ -17,27 +16,60 @@ model:
       size: 1
       offset: 1
 
+  optimizer:
+    name: Adam          # any optimizers from torch.optim
+    params:
+      lr: 0.0001
+
+  # lr_scheduler:
+  #   name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
+  #   params:
+  #     max_lr: 0.0001
+
 data:
   train:
     data_dir: datasets/COCO
     coco: True
-    coco_name: train2017
+    coco_version: train2017
     batch_size: 16
+    transforms:
+      # augmentations used in CenterNet paper
+      # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
+      # they also used PCA augmentation, but didn't mention in their paper
+      - name: HorizontalFlip        # any transformations from Albumentation
+        params:
+          p: 0.5
+      - name: RandomResizedCrop
+        params:
+          height: 512
+          width: 512
+      - name: ColorJitter
+        params:
+          brightness: 0.4
+          contrast: 0.4
+          saturation: 0.4
 
   validation:
     data_dir: datasets/COCO
     coco: True
-    coco_name: val2017
+    coco_version: val2017
     batch_size: 16
+    transforms:
+      - name: Resize
+        params:
+          height: 512
+          width: 512
 
 trainer:
-  gpus: 1
-  precision: 16
-  max_epochs: 10
-  val_check_interval: 0.5
-  callbacks:
+  params:
+    gpus: 1
+    precision: 16
+    max_epochs: 1
+    val_check_interval: 0.5
+    benchmark: True
 
-  optimizer:
-    name: adam
-    lr: 0.0001
-  
+  logger:
+    name: wandb         # tensorboard or wandb
+    params:
+      project: test
+      log_model: True

@@ -1,5 +1,15 @@
+from enum import Enum
+from typing import Dict
 import numpy as np
+import torch
+
 import cv2
+import matplotlib.pyplot as plt
+import pytorch_lightning as pl
+import wandb
+
+RED = (1., 0., 0.)
+BLUE = (0., 0., 1.)
 
 def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
     """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
@@ -77,3 +87,95 @@ def draw_heatmap(img: np.ndarray, heatmap: np.ndarray, inplace: bool=True):
     # blend to first channel, using max
     img[:,:,0] = np.maximum(img[:,:,0], heatmap, out=img[:,:,0])
     return img
+
+def apply_mpl_cmap(input: np.ndarray, cmap: str, return_tensor=False, channel_first=False):
+    """input is 1-channel image with dimension NHW (no channel dimension)
+    """
+    cm = plt.get_cmap(cmap)
+    output = cm(input)[...,:3]  # apply cmap and remove alpha channel
+
+    if channel_first:
+        output = output.transpose(0,3,1,2)  # NHWC to NCHW
+    if return_tensor:
+        output = torch.from_numpy(output)
+    return output
+
+class LogImageCallback(pl.Callback):
+    def __init__(self, logger_type: bool = "tensorboard", num_samples: int = 8, num_bboxes: int = 10, cmap: str = "viridis"):
+        assert logger_type in ("wandb", "tensorboard")
+        
+        self.logger_type = logger_type
+        self.num_samples = num_samples      # number of images to draw
+        self.num_bboxes  = num_bboxes        # number of bboxes to draw per image
+        self.cmap        = cmap
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        # only log sample images for the first validation batch
+        if batch_idx == 0:
+            # log images with predicted and target bboxes
+            pred_detections = outputs["detections"]
+            imgs = batch["image"]
+
+            # only take the first num_bboxes of detections
+            pred_detections   = {k: v[:,:self.num_bboxes].float().cpu().numpy() for k,v in pred_detections.items()}
+            target_detections = {k: batch[k].float().cpu().numpy() for k in ["bboxes", "labels"]}
+            convert_cxcywh_to_x1y1x2y2(pred_detections["bboxes"])
+            convert_cxcywh_to_x1y1x2y2(target_detections["bboxes"])
+            pred_detections["labels"]   = pred_detections["labels"].astype(int)
+            target_detections["labels"] = target_detections["labels"].astype(int)
+
+            # only take the first num_samples of images
+            num_samples = min(imgs.shape[0], self.num_samples)
+            imgs = imgs[:num_samples].float().cpu().numpy()
+            imgs = imgs.transpose(0,2,3,1)      # NCHW to NHWC
+            imgs = np.ascontiguousarray(imgs)   # for cv2
+            
+            for i in range(num_samples):
+                draw_bboxes(
+                    imgs[i],
+                    pred_detections["bboxes"][i],
+                    pred_detections["labels"][i],
+                    pred_detections["scores"][i],
+                    color=RED
+                )
+                draw_bboxes(
+                    imgs[i],
+                    target_detections["bboxes"][i],
+                    target_detections["labels"][i],
+                    color=BLUE
+                )
+            
+            # log output heatmap and backbone output
+            encoded_output: Dict[str, torch.Tensor] = outputs["encoded_output"]
+            pred_heatmap        = encoded_output["heatmap"][:self.num_samples].float().cpu()
+            pred_heatmap        = torch.sigmoid(pred_heatmap)                   # convert to probability
+            pred_heatmap, _     = torch.max(pred_heatmap, dim=1)                # max aggregate across classes/channels
+            pred_heatmap_scaled = pred_heatmap / torch.max(pred_heatmap)        # scale to [0,1] for visualization
+            pred_heatmap        = apply_mpl_cmap(pred_heatmap.numpy(), self.cmap)
+            pred_heatmap_scaled = apply_mpl_cmap(pred_heatmap_scaled.numpy(), self.cmap)
+
+            backbone_output = encoded_output["backbone_features"][:self.num_samples].float().cpu()
+            backbone_output = torch.mean(backbone_output, dim=1)            # mean aggregate across channels
+            backbone_output = apply_mpl_cmap(backbone_output.numpy(), self.cmap)
+
+            log_images = {
+                "output detections" : imgs,
+                "heatmap"           : pred_heatmap,
+                "heatmap (scaled)"  : pred_heatmap_scaled,
+                "backbone output"   : backbone_output
+            }
+            
+            for img_name, images in log_images.items():
+                if self.logger_type == "wandb":
+                    trainer.logger.experiment.log({
+                        f"val/{img_name}": [wandb.Image(img) for img in images],
+                        "global_step": trainer.global_step
+                    })
+                
+                elif self.logger_type == "tensorboard":
+                    trainer.logger.experiment.add_images(
+                        f"val/{img_name}",
+                        images, 
+                        trainer.global_step,
+                        dataformats="nhwc"
+                    )

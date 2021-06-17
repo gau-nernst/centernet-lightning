@@ -75,7 +75,7 @@ def tpfp_detections(pred_bboxes: np.ndarray, scores: np.ndarray, target_bboxes: 
     
     return tp, fp
 
-def class_tpfp_batch(detections, targets, num_classes, iou_threshold=0.5, detection_threshold=0.5, eps=1e-6):
+def class_tpfp_batch(detections, targets, num_classes, iou_threshold=0.5, detection_threshold=0.5):
     """Compute TP and FP on a batch of predicted and ground truth detections
     """
     # N x K predicted detections
