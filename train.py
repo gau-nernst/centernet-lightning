@@ -8,6 +8,7 @@ import argparse
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+from pytorch_lightning.callbacks import LearningRateMonitor
 
 from datasets import COCODataModule
 from model import build_centernet_from_cfg
@@ -35,12 +36,14 @@ def train(config: Union[str, Dict]):
             logger = True
 
         callbacks = [
+            LearningRateMonitor(logging_interval="step"),
             LogImageCallback(config["trainer"]["logger"]["name"])
         ]
      
     else:
         logger = True
         callbacks = [
+            LearningRateMonitor(logging_interval="step"),
             LogImageCallback("tensorboard")
         ]
 
