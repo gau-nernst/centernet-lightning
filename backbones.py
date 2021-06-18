@@ -21,6 +21,7 @@ _mobilenet_channels = {
 }
 
 def get_resnet_stages(name: str, pretrained: bool = True):
+    # TODO: add option to freeze stages
     backbone = resnet.__dict__[name](pretrained=pretrained)
     stages = [
         nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool),
@@ -32,6 +33,7 @@ def get_resnet_stages(name: str, pretrained: bool = True):
     return stages
 
 def get_mobilenet_stages(name: str, pretrained: bool = True):
+    # TODO: add option to freeze stages
     # conv with stride = 2 (downsample) will be the first layer of each stage
     # this is to ensure that at each stage, it is the most refined feature map at that re
     # https://github.com/pytorch/vision/blob/master/torchvision/models/detection/backbone_utils.py
