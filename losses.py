@@ -95,6 +95,7 @@ def render_target_heatmap_cornernet(
     # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_gt.py
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/utils.py
     heatmap = torch.zeros(shape, dtype=torch.float32, device=device)
+    img_width, img_height = shape[-2:]
     box_x = bboxes[...,0].long()
     box_y = bboxes[...,1].long()
     box_w = bboxes[...,2]
@@ -113,8 +114,6 @@ def render_target_heatmap_cornernet(
         idx = indices[i]
         x = box_x[i]
         y = box_y[i]
-        w = box_w[i]
-        h = box_h[i]
         r = radius[i]
 
         # replace np.ogrid with torch.meshgrid since pytorch does not have ogrid
@@ -127,9 +126,9 @@ def render_target_heatmap_cornernet(
         gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0      # clamping? is this necessary?
 
         left   = min(x, r)
-        right  = min(w - x, r + 1).long()
+        right  = min(img_width - x, r + 1).long()
         top    = min(y, r)
-        bottom = min(h - y, r + 1).long()
+        bottom = min(img_height - y, r + 1).long()
 
         masked_heatmap = heatmap[idx, y - top:y + bottom, x - left:x + right]
         masked_gaussian = gaussian[r - top:r + bottom, r - left:r + right]

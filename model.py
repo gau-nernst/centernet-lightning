@@ -67,7 +67,7 @@ class CenterNet(pl.LightningModule):
             # loss for size and offset head should be either L1Loss or SmoothL1Loss
             # cornernet uses smooth l1 loss, centernet uses l1 loss
             # NOTE: centernet author noted that l1 loss is better than smooth l1 loss
-            loss_fn = nn.__dict__[loss_functions[h]](reduction=None)    # don't use reduction to apply mask later
+            loss_fn = nn.__dict__[loss_functions[h]](reduction="none")    # don't use reduction to apply mask later
             self.output_heads[h] = head
             self.head_loss_fn[h] = loss_fn
         
@@ -259,6 +259,8 @@ class CenterNet(pl.LightningModule):
         if batch_idx == 0:
             result["detections"] = pred_detections
             result["encoded_output"] = encoded_output
+            # self.log("val/size_output", encoded_output["size"].view(-1))
+            # self.log("val/offset_output", encoded_output["offset"].view(-1))
     
         return result
 
@@ -300,7 +302,7 @@ class CenterNet(pl.LightningModule):
             return self.trainer.max_steps
         
         if self._steps_per_epoch is None:
-            self._steps_per_epoch = len(self.train_dataloader()) / self.trainer.accumulate_grad_batches
+            self._steps_per_epoch = len(self.train_dataloader()) // self.trainer.accumulate_grad_batches
         
         return self._steps_per_epoch
 
@@ -332,7 +334,16 @@ class CenterNet(pl.LightningModule):
         else:
             lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
 
-        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
+        # override default behavior to update lr every step instead of epoch
+        return_dict = {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": lr_scheduler,
+                "interval": "step",
+                "frequency": 1
+            }
+        }
+        return return_dict
 
 def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
     """Build CenterNet from a confile file.
