@@ -125,12 +125,17 @@ class LogImageCallback(pl.Callback):
             imgs = batch["image"]
 
             # only take the first num_bboxes of detections
-            pred_detections   = {k: v[:,:self.num_bboxes].float().cpu().numpy() for k,v in pred_detections.items()}
-            target_detections = {k: batch[k].float().cpu().numpy() for k in ["bboxes", "labels"]}
-            convert_cxcywh_to_x1y1x2y2(pred_detections["bboxes"])
-            convert_cxcywh_to_x1y1x2y2(target_detections["bboxes"])
-            pred_detections["labels"]   = pred_detections["labels"].astype(int)
-            target_detections["labels"] = target_detections["labels"].astype(int)
+            pred_bboxes = pred_detections["bboxes"].float().cpu().numpy()
+            pred_labels = pred_detections["labels"].float().cpu().numpy()
+            pred_scores = pred_detections["scores"].float().cpu().numpy()
+
+            target_bboxes = batch["bboxes"].float().cpu().numpy()
+            target_labels = batch["labels"].float().cpu().numpy()
+
+            convert_cxcywh_to_x1y1x2y2(pred_bboxes)
+            convert_cxcywh_to_x1y1x2y2(target_bboxes)
+            pred_labels   = pred_labels.astype(int)
+            target_labels = target_labels.astype(int)
 
             # only take the first num_samples of images
             num_samples = min(imgs.shape[0], self.num_samples)
@@ -138,20 +143,11 @@ class LogImageCallback(pl.Callback):
             imgs = imgs.transpose(0,2,3,1)      # NCHW to NHWC
             imgs = np.ascontiguousarray(imgs)   # for cv2
             
-            for i in range(num_samples):
-                draw_bboxes(
-                    imgs[i],
-                    pred_detections["bboxes"][i],
-                    pred_detections["labels"][i],
-                    pred_detections["scores"][i],
-                    color=RED
-                )
-                draw_bboxes(
-                    imgs[i],
-                    target_detections["bboxes"][i],
-                    target_detections["labels"][i],
-                    color=BLUE
-                )
+            # if self.logger_type != "wandb":
+            if True:
+                for i in range(num_samples):
+                    draw_bboxes(imgs[i], pred_bboxes[i], pred_labels[i], pred_scores[i], color=RED)
+                    draw_bboxes(imgs[i], target_bboxes[i], target_labels[i], color=BLUE)
             
             # log output heatmap and backbone output
             encoded_output = outputs["encoded_output"]
@@ -173,6 +169,17 @@ class LogImageCallback(pl.Callback):
                 "backbone output"   : backbone_output
             }
             
+            # if self.logger_type == "wandb":
+            #     detections = []
+            #     for i in range(len(imgs)):
+            #         # consider make a collage of images first then do this, so log only 1 image
+            #         wandb_img = wandb.Image(imgs[i], boxes={
+            #             "predictions": {"box_data": convert_bboxes_to_wandb(pred_bboxes[i].astype(int), pred_labels[i], pred_scores[i])},
+            #             "ground_truth": {"box_data": convert_bboxes_to_wandb(target_bboxes[i].astype(int), target_labels[i])},
+            #         })
+            #         detections.append(wandb_img)
+                
+
             for img_name, images in log_images.items():
                 if self.logger_type == "wandb":
                     trainer.logger.experiment.log({
@@ -187,3 +194,27 @@ class LogImageCallback(pl.Callback):
                         trainer.global_step,
                         dataformats="nhwc"
                     )
+
+def convert_bboxes_to_wandb(bboxes: np.ndarray, labels: np.ndarray, scores: np.ndarray = None):
+    wandb_boxes = []
+
+    if scores == None:
+        scores = [None] * len(labels)
+    
+    for box, box_label, box_score in zip(bboxes, labels, scores):
+        item = {
+            "position": {
+                "minX": box[0],
+                "minY": box[1],
+                "maxX": box[2],
+                "maxY": box[3]
+            },
+            "domain": "pixel",
+            "class_id": box_label
+        }
+        if box_score is not None:
+            item["scores"] = {"confidence": box_score}
+        
+        wandb_boxes.append(item)
+    
+    return wandb_boxes
