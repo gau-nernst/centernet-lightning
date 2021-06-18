@@ -1,7 +1,7 @@
 import torch
 
 from model import *
-from losses import render_target_heatmap
+from losses import render_target_heatmap_ttfnet
 
 sample_cfg = "configs/coco_resnet34.yaml"
 
@@ -55,7 +55,7 @@ class TestModels:
         x1 = centers[0][0]
         y1 = centers[0][1]
         
-        heatmap = render_target_heatmap((4,128,128), centers, sizes, indices, mask) * 0.95
+        heatmap = render_target_heatmap_ttfnet((4,128,128), centers, sizes, indices, mask) * 0.95
         heatmap[indices[0],y1,x1] = 1                               # make the first point having highest score
         heatmap = -torch.log((1 - heatmap) / (heatmap + 1e-8))      # inverse sigmoid, convert probabilities to logits
 

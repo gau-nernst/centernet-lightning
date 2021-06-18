@@ -1,5 +1,5 @@
 import torch
-from losses import FocalLossWithLogits, reference_focal_loss, render_target_heatmap
+from losses import FocalLossWithLogits, reference_focal_loss, render_target_heatmap_ttfnet
 
 class TestLosses:
     OUTPUT_SIZE = 128
@@ -12,7 +12,7 @@ class TestLosses:
         indices = torch.tensor([1,0,2])
         mask = torch.tensor([1,1,0])
 
-        heatmap = render_target_heatmap(self.HEATMAP_SHAPE, centers, sizes, indices, mask)
+        heatmap = render_target_heatmap_ttfnet(self.HEATMAP_SHAPE, centers, sizes, indices, mask)
 
         assert heatmap[indices,centers[:,1],centers[:,0]].sum() == mask.sum()    # peak is 1 if mask == 1
         assert torch.sum(heatmap == 1) == mask.sum()           # correct number of peaks
@@ -26,7 +26,7 @@ class TestLosses:
         indices = torch.tensor([1,0,2])
         mask = torch.tensor([1,1,0])
 
-        sample_target = render_target_heatmap(self.HEATMAP_SHAPE, centers, sizes, indices, mask)
+        sample_target = render_target_heatmap_ttfnet(self.HEATMAP_SHAPE, centers, sizes, indices, mask)
         focal_loss = FocalLossWithLogits(alpha=2, beta=4)
 
         loss1 = focal_loss(sample_output, sample_target)

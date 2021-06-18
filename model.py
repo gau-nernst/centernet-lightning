@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 from backbones import build_backbone
-from losses import FocalLossWithLogits, render_target_heatmap
+from losses import FocalLossWithLogits, render_target_heatmap_ttfnet, render_target_heatmap_cornernet
 from metrics import class_tpfp_batch
 from utils import convert_cxcywh_to_x1y1x2y2
 
@@ -39,30 +39,37 @@ class CenterNet(pl.LightningModule):
         self.output_stride = self.backbone.output_stride    # how much input image is downsampled
         
         self.num_classes = num_classes
-        self.focal_loss = FocalLossWithLogits(alpha=2., beta=4.)    # parameterized focal loss for heatmap
 
         heatmap_bias = output_heads["heatmap_bias"]
         other_heads  = output_heads["other_heads"]
         loss_weights = output_heads["loss_weights"]
+        loss_functions = output_heads["loss_functions"]
 
-        # for heatmap output, fill a pre-defined bias value
-        # for other outputs, fill bias with 0 to match identity mapping (from centernet)
+        # create output heads and set their losses
         self.output_heads = nn.ModuleDict()
+        self.head_loss_fn = nn.ModuleDict()
         self.output_heads["heatmap"] = self._make_output_head(
             backbone_channels,
             num_classes,
-            fill_bias=heatmap_bias
+            fill_bias=heatmap_bias          # use heatmap_bias for heatmap output
         )
+        self.head_loss_fn["heatmap"] = FocalLossWithLogits(alpha=2., beta=4.)       # focal loss for heatmap
 
         for h in other_heads:
             assert h in _supported_heads
             assert h in loss_weights
+            assert h in loss_functions
             head = self._make_output_head(
                 backbone_channels,
                 _output_head_channels[h],
-                fill_bias=0
+                fill_bias=0                 # set bias to 0
             )
+            # loss for size and offset head should be either L1Loss or SmoothL1Loss
+            # cornernet uses smooth l1 loss, centernet uses l1 loss
+            # NOTE: centernet author noted that l1 loss is better than smooth l1 loss
+            loss_fn = nn.__dict__[loss_functions[h]](reduction=None)    # don't use reduction to apply mask later
             self.output_heads[h] = head
+            self.head_loss_fn[h] = loss_fn
         
         self.other_heads  = other_heads
         self.loss_weights = loss_weights   
@@ -71,6 +78,7 @@ class CenterNet(pl.LightningModule):
         self.lr_scheduler_cfg = lr_scheduler
 
         self.save_hyperparameters()
+        self._steps_per_epoch = None        # for steps_per_epoch property
 
     def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float = None):
         # Reference implementations
@@ -116,8 +124,8 @@ class CenterNet(pl.LightningModule):
         # initialize losses to 0
         losses = {}
 
-        bboxes = bboxes.clone() / self.output_stride    # convert input coordinates to output coordinates
-        centers_int = bboxes[...,:2].long()              # convert to integer to use as index
+        out_bboxes = bboxes / self.output_stride    # convert input coordinates to output coordinates
+        centers_int = out_bboxes[...,:2].long()     # convert to integer to use as index
 
         # combine xy indices for torch.gather()
         # repeat indices using .expand() to gather on 2 channels
@@ -128,32 +136,30 @@ class CenterNet(pl.LightningModule):
         pred_offset = torch.gather(offset_map, dim=-1, index=xy_indices)    # N2D
 
         # need to swapaxes since pred_size is N2D but true_wh is ND2
-        # use the mask to ignore none detections due to padding
-        # NOTE: author noted that l1 loss is better than smooth l1 loss
-        size_loss = F.l1_loss(pred_sizes.swapaxes(1,2), bboxes[...,2:], reduction="none")
+        size_loss = self.head_loss_fn["size"](pred_sizes.swapaxes(1,2), out_bboxes[...,2:])
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
-        target_offset = bboxes[...,:2] - torch.floor(bboxes[...,:2])
-        offset_loss = F.l1_loss(pred_offset.swapaxes(1,2), target_offset, reduction="none")
+        target_offset = out_bboxes[...,:2] - torch.floor(out_bboxes[...,:2])
+        offset_loss = self.head_loss_fn["offset"](pred_offset.swapaxes(1,2), target_offset)
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
         losses["heatmap"] = torch.tensor(0., dtype=torch.float32, device=self.device)
         for b in range(batch_size):
             # render target heatmap and accumulate focal loss
-            target_heatmap = render_target_heatmap(
+            # 2 versions: cornernet (original) and ttfnet
+            target_heatmap = render_target_heatmap_cornernet(
                 heatmap.shape[1:],
-                centers_int[b],
-                bboxes[b,:,:2], 
+                out_bboxes[b],
                 labels[b],
                 mask[b],
                 device=self.device
             )
-            losses["heatmap"] += self.focal_loss(heatmap[b], target_heatmap)
+            losses["heatmap"] += self.head_loss_fn["heatmap"](heatmap[b], target_heatmap)
 
         # average over number of detections
-        N = torch.sum(mask)
+        N = torch.sum(mask) + 1e-8
         losses["heatmap"] /= N
         losses["size"] /= N
         losses["offset"] /= N
@@ -216,6 +222,7 @@ class CenterNet(pl.LightningModule):
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
         self.log("train/total_loss", total_loss)
+        self.log("epoch_frac", self.global_step / self.steps_per_epoch)     # log this to view graph with epoch as x-axis
 
         return total_loss
 
@@ -285,6 +292,17 @@ class CenterNet(pl.LightningModule):
         class_tp, class_fp = class_tpfp_batch(preds, targets, self.num_classes, detection_threshold=detection_threshold)
         return class_tp, class_fp
 
+    @property
+    def steps_per_epoch(self):
+        # does not consider multi-gpu training
+        if self.trainer.max_steps:
+            return self.trainer.max_steps
+        
+        if self._steps_per_epoch is None:
+            self._steps_per_epoch = len(self.train_dataloader()) / self.trainer.accumulate_grad_batches
+        
+        return self._steps_per_epoch
+
     def register_optimizer(self, optimizer_cfg: Dict):
         self.optimizer_cfg = optimizer_cfg
 
@@ -304,8 +322,14 @@ class CenterNet(pl.LightningModule):
         if self.lr_scheduler_cfg is None:
             return optimizer
         
+        # NOTE: need a better way to manage lr_schedulers
+        # - some lr schedulers need info about training -> cannot provide from config file e.g. OneCycleLR
+        # - support for multiple lr schedulers
         lr_scheduler_algo = torch.optim.lr_scheduler.__dict__[self.lr_scheduler_cfg["name"]]
-        lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
+        if self.lr_scheduler_cfg["name"] in ("OneCycleLR"):
+            lr_scheduler = lr_scheduler_algo(optimizer, epochs=self.trainer.max_epochs, steps_per_epoch=self.steps_per_epoch, **self.lr_scheduler_cfg["params"])
+        else:
+            lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
 
