@@ -35,11 +35,8 @@ def prepare_coco_detection(data_dir: str, coco_version: str):
     coco = COCO(ann_file)
     categories = OrderedDict(coco.cats)
     
-    label_to_id = {0: 0}    # 0 is background class
-    label_to_name = {0: "background"}
-    for i, v in enumerate(categories.values()):
-        label_to_id[i+1] = v["id"]
-        label_to_name[i+1] = v["name"]
+    label_to_id = {i: v["id"] for i, v in enumerate(categories.values())}
+    label_to_name = {i: v["name"] for i, v in enumerate(categories.values())}
     id_to_label = {v: k for k, v in label_to_id.items()}
 
     # save to disk
@@ -186,22 +183,16 @@ class COCODataModule(pl.LightningDataModule):
     def train_dataloader(self):
         train_dataloader = DataLoader(
             self.coco_train,
-            batch_size=self.train_cfg["batch_size"],
-            shuffle=True,
-            num_workers=4,
             collate_fn=collate_detections_with_padding,
-            pin_memory=True
+            **self.train_cfg["dataloader_params"]
         )
         return train_dataloader
 
     def val_dataloader(self):
         val_dataloader = DataLoader(
             self.coco_val,
-            batch_size=self.val_cfg["batch_size"],
-            shuffle=False,
-            num_workers=4,
             collate_fn=collate_detections_with_padding,
-            pin_memory=True
+            **self.val_cfg["dataloader_params"]
         )
         return val_dataloader
 

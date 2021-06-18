@@ -36,7 +36,11 @@ data:
     data_dir: datasets/COCO
     coco: True
     coco_version: train2017
-    batch_size: 32
+    dataloader_params:
+      batch_size: 64
+      num_workers: 8
+      shuffle: True
+      pin_memory: True
     transforms:
       # augmentations used in CenterNet paper
       # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
@@ -58,7 +62,11 @@ data:
     data_dir: datasets/COCO
     coco: True
     coco_version: val2017
-    batch_size: 32
+    dataloader_params:
+      batch_size: 64
+      num_workers: 8
+      shuffle: False
+      pin_memory: True
     transforms:
       - name: Resize
         params:
@@ -71,9 +79,9 @@ trainer:
     precision: 16
     max_epochs: 10
     limit_val_batches: 20
-    val_check_interval: 0.1
+    val_check_interval: 0.5
     benchmark: True
-    gradient_clip_value: 35     # mmdetection
+    gradient_clip_val: 35     # mmdetection
 
   logger:
     name: wandb         # tensorboard or wandb

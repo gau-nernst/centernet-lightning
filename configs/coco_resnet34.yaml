@@ -19,22 +19,28 @@ model:
       size: L1Loss      # a loss from torch.nn e.g. L1Loss, SmoothL1Loss
       offset: L1Loss
 
-  optimizer:
-    name: Adam          # any optimizers from torch.optim
+  optimizer:           # mmdetection
+    name: SGD          # any optimizers from torch.optim
     params:
-      lr: 0.0001
+      lr: 0.02
+      momentum: 0.9
+      weight_decay: 0.0001
 
-  # lr_scheduler:
-  #   name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
-  #   params:
-  #     max_lr: 0.0001
+  lr_scheduler:
+    name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
+    params:
+      max_lr: 0.02
 
 data:
   train:
     data_dir: datasets/COCO
     coco: True
     coco_version: train2017
-    batch_size: 16
+    dataloader_params:
+      batch_size: 32
+      num_workers: 8
+      shuffle: True
+      pin_memory: True
     transforms:
       # augmentations used in CenterNet paper
       # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
@@ -56,7 +62,11 @@ data:
     data_dir: datasets/COCO
     coco: True
     coco_version: val2017
-    batch_size: 16
+    dataloader_params:
+      batch_size: 32
+      num_workers: 8
+      shuffle: False
+      pin_memory: True
     transforms:
       - name: Resize
         params:
@@ -67,10 +77,11 @@ trainer:
   params:
     gpus: 1
     precision: 16
-    max_epochs: 1
+    max_epochs: 10
     limit_val_batches: 20
-    val_check_interval: 0.1
+    val_check_interval: 0.5
     benchmark: True
+    gradient_clip_val: 35     # mmdetection
 
   logger:
     name: wandb         # tensorboard or wandb
