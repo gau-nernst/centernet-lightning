@@ -124,7 +124,7 @@ class CenterNet(pl.LightningModule):
         # initialize losses to 0
         losses = {}
 
-        out_bboxes = bboxes / self.output_stride    # convert input coordinates to output coordinates
+        out_bboxes = bboxes / self.output_stride    # convert input image coordinates to output image coordinates
         centers_int = out_bboxes[...,:2].long()     # convert to integer to use as index
 
         # combine xy indices for torch.gather()
@@ -197,8 +197,9 @@ class CenterNet(pl.LightningModule):
         topk_x_indices  = topk_xy_indices % out_w
 
         # extract bboxes at topk xy positions
-        topk_x = topk_x_indices + torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)
-        topk_y = topk_y_indices + torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)
+        # they are in input image coordinates (512x512)
+        topk_x = (topk_x_indices + torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)) * self.output_stride
+        topk_y = (topk_y_indices + torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)) * self.output_stride
         topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices)
         topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices)
 
