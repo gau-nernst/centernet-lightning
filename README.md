@@ -12,10 +12,11 @@ Special thanks
 Main dependencies
 
 - pytorch, torchvision
+- numpy
 - opencv-python
 - pytorch-lightning
 - pycocotools (to read COCO dataset. Cython is required. Use [gautamchitnis](https://github.com/gautamchitnis/cocoapi) fork to support Windows)
-- albumentations (for augmentations during training)
+- albumentations (for augmentations)
 
 Other dependencies
 
@@ -44,24 +45,47 @@ In Windows, replace `-c nvidia` with `-c conda-forge`. If you don't have NVIDIA 
 Install other dependencies
 
 ```bash
-conda install cython
-conda install pytorch-lightning -c conda-forge
-pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
-pip install opencv-python
+pip install cython, pytorch-lightning, opencv-python
 pip install -U albumentations --no-binary imgaug,albumentations
-pip install wandb           # optional
+pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
+
+# optional packages
+pip install pytest, wandb
 ```
 
 ## Usage
 
-Create a supported backbone and pass it to the `CenterNet` class to create a CenterNet model.
+Import `build_centernet_from_cfg` from `model.py` to create a CenterNet model from a YAML file. Sample config files are provided in the `config/` directory.
 
 ```python
-from model import simple_resnet_backbone, CenterNet
+from model import build_centernet_from_cfg
 
-backbone = simple_resnet_backbone("resnet34")
-model = CenterNet(mod)
+model = build_centernet_from_cfg("configs/coco_resnet34.yaml")
 ```
+
+To run inference
+
+```python
+import cv2
+
+img = cv2.imread("sample_img.jpg")
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+img = np.transpose(img, (1,2,0))        # HWC to CHW
+img = {"image": torch.from_numpy(img).unsqueeze(1)}
+
+model.eval()
+with torch.no_grad():
+    encoded_outputs = model(img)
+    detections = model.decode_detections(encoded_outputs, num_detections=10)
+
+# detections = {
+#   "bboxes": bounding boxes in cxcywh format, shape (batch x num_detections x 4)
+#   "labels": class labels, shape (batch x num_detections)
+#   "scores": confidence scores, shape (batch x num_detections)
+# }
+```
+
+Results are `torch.Tensor`. Use `.numpy()` to get `np.ndarray`.
 
 ## Model architecture
 
@@ -69,31 +93,48 @@ The `CenterNet` is a "meta" architecture: it can take in any backbone (that outp
 
 Backbones:
 
-- [x] `SimpleBackbone`: a base CNN network with an upsample stage with convolution transpose. It is the ResNet model specified in the original paper. DCN layer is not supported. SimpleBackbone with ResNet and MobileNet (from torchvision) are implemented.
-- [x] `FPNBackbone`: a base CNN network with a feature pyramid to fuse feature maps at different resolutions. ResNet and MobileNet FPN are implemented.
+- [x] `SimpleBackbone`: a base CNN network with an upsample stage. It is the ResNet model specified in the original paper.
+- [x] `FPNBackbone`: a base CNN network with a feature pyramid to fuse feature maps at different resolutions.
 - [ ] `IDABackbone`: not implemented
 - [ ] `DLABackbone`: not implemented. The author claims this is the best backbone for CenterNet/Track
+- [ ] `BiFPNBackbone`: not implemented. This is an upgraded version of FPN, introduced by the EfficientDet paper. CenterNet2 also uses this new backbone
+
+Since CenterNet performs single-scale detection, feature map fusion is very important to achieve good performance.
 
 Output heads:
 
 - [x] `heatmap`: compulsory, class scores at each position
 - [x] `size`: (relative) width and height regression, to determin bounding box size
 - [x] `offset`: center x and y offset regression, to refine center's position
-- [ ] `displacement`: for CenterTrack, currently not implemented
+- [ ] `displacement`: for CenterTrack, not implemented
+
+Since the model is built entirely from a config file, you can use the config file to customize model's hyperparameters. Not all hyperparameters are customizable. Check the sample config files to see what is customizable.
+
+Base CNNs:
+
+- [x] (torchvision) ResNet family (resnet, resnext, wide resnet)
+- [x] (torchvision) MobileNet family (v2, v3-large, v3-small)
 
 ## Training
 
-PyTorch Lightning is used for training. Use `train.py` to train the model. You need to specify the backbone and hyperparameters in a YAML config file. Modify `train.py` to use your own config file. Some sample configs are provided in the `configs/` directory. 
+To train the model, run `train.py` and specify the config file.
 
 ```bash
-python train.py
+python train.py --config "configs/coco_resnet34.yaml"
 ```
 
-To use Weights and Biases logging, set `use_wandb = True` in the training script. Create a file named `.wandb_key` and place your wandb API key in this file.
+The config file specifies everything required to train the model, including model construction, dataset, augmentations and training schedule.
+
+- Customize model architecture: See above.
+- Train on custom dataset: Not possible to specify in the config file for now. See below on how to write your custom dataset.
+- Add custom augmentations: Only Albumentation transformations are supported. This is because Albumentation will handle transforming bounding boxes for us. To specify a new augmentation, simply add to the list `transforms` under each dataset.
+- Training epochs: You can change it in the config file
+- Optimizer: Optimizers are taken from the official PyTorch library, so you can specify any of them in the config file. To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
+- Learning rate schedule: Similar to optimizers, learning rate schedulers are takken from the official PyTorch library. To use other learning rate schedulers, modify the `configure_optimizers()` method.
 
 ## Dataset
 
-Currently only COCO dataset is supported.
+Currently only COCO dataset is supported for training. A simple `InferenceDataset` class can be used for inference only.
 
 ### COCO dataset
 
@@ -109,32 +150,59 @@ COCO
 ├── train2017/
 ```
 
-pycocotools loads all annotation data into memory, which can be very large for COCO train set, thus it is not efficient for pytorch DataLoader. Run `prepare_coco_detection()` function from `datasets.py` to extract only the necessary information (image file paths, bounding boxes and labels) and serialize it to disk with pickle (note: pickle is platform dependent). `COCODataset` reads this pickle file instead of the original annotation file.
+Lightning Datamodule is used to prepare the dataset. Pass in a config dictionary to initialize the data module. Check sample config files for the structure and possible options.
 
 ```python
-from datasets import prepare_coco_detection
+from datasets import COCODataModule
 
+train_cfg = {
+    "data_dir": "datasets/COCO",
+    "coco_version": "train2017",
+    "dataloader_params": {"batch_size": 4}
+}
+val_cfg = {
+    "data_dir": "datasets/COCO",
+    "coco_version": "val2017",
+    "dataloader_params": {"batch_size": 4}
+}
+
+coco_datamodule = COCODataModule(train=train_cfg, validation=val_cfg)
+coco_datamodule.setup()         # process coco annotations
+
+train_dataloader = coco_datamodule.train_dataloader()
+val_dataloader = coco_datamodule.val_dataloader()
+```
+
+`pycocotools` loads all annotation data into memory, which can be very large for COCO train set. `.setup()` method will run `prepare_coco_detection()` function to extract only the necessary information for the detection task (image file paths, bounding boxes and labels). 
+
+You can also directly use the class `COCODataset`, but make sure to run `prepare_coco_detection()` before creating the dataset.
+
+```python
+from datasets import prepare_coco_detection, COCODataset
+
+coco_dir = "datsets/COCO"
 prepare_coco_detection(coco_dir, "val2017")
-prepare_coco_detection(coco_dir, "train2017")
+val_coco_ds = COCODataset(coco_dir, "val2017", transforms=...)
 ```
 
-COCO dataset then can be initialized
+### Inference dataset
 
 ```python
-from datasets import COCODataset
+from datasets import InferenceDataset
 
-val_coco_ds = COCODataset(coco_dir, "val2017")
-train_coco_ds = COCODataset(coco_dir, "train2017")
+dataset = InferenceDataset("path/to/images")
 ```
 
-### Custom dataset
+### Custom dataset for training
 
-You can write your own custom dataset, as long as it conforms to the format that the model expects. The model takes in a dictionary with the following key-value pairs:
+You can write your own custom dataset, as long as it conforms to the format that the model expects. A batch of input data should be a dictionary with the following key-value pairs:
 
 - `image`: images in `CHW` format. Shape `NCHW`.
-- `bboxes`: bounding boxes `(x_center, y_center, width, height)` in relative scale `[0,1]`. Shape `ND4`, where `D` is the number of detections in one image.
+- `bboxes`: bounding boxes in `(cx,cy,w,h)` format (unit: pixel). Shape `ND4`, where `D` is the number of detections in one image.
 - `labels`: labels `[0,num_classes-1]`. Shape `ND`.
 - `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same lengths within one batch. This is used in calculating loss. Shape `ND`.
+
+If you only need inference, only key `image` is needed.
 
 ## Notes
 
@@ -146,5 +214,4 @@ Unsupported features from original CenterNet:
 Notable modifications:
 
 - Focal loss: use `torch.logsigmoid()` to improve numerical stability when calculating focal loss. [CenterNet-better-plus](https://github.com/lbin/CenterNet-better-plus) and [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet) clamp input tensor.
-- Gaussian render kernel: following [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet), the Gaussian kernel to render ground truth heatmap follows [TTFNet](https://arxiv.org/abs/1909.00700) formulation, which is simpler (and supposedly better) than the original CenterNet (which was actually taken from CornerNet).
-- Size regression: size output from the model is interpreted as relative scale (normalized by image width and height), instead of pixel scale in the original paper. This requires compensation in size loss weight (lambda_size), which is set to 1 instead of 0.1 in this case.
+- Gaussian kernel for target heatmp: there are 2 versions implemented: original CornerNet version (with bug fix) and TTFNet version.
