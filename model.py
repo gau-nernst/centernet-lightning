@@ -8,11 +8,15 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+import wandb
 
 from backbones import build_backbone
 from losses import FocalLossWithLogits, render_target_heatmap_ttfnet, render_target_heatmap_cornernet
 from metrics import class_tpfp_batch
 from utils import convert_cxcywh_to_x1y1x2y2
+
+__all__ = ["CenterNet", "build_centernet_from_cfg"]
 
 _supported_heads = ["size", "offset"]
 _output_head_channels = {
@@ -40,8 +44,8 @@ class CenterNet(pl.LightningModule):
         
         self.num_classes = num_classes
 
-        heatmap_bias = output_heads["heatmap_bias"]
-        other_heads  = output_heads["other_heads"]
+        fill_bias = output_heads["fill_bias"]
+        other_heads = output_heads["other_heads"]
         loss_weights = output_heads["loss_weights"]
         loss_functions = output_heads["loss_functions"]
 
@@ -51,7 +55,7 @@ class CenterNet(pl.LightningModule):
         self.output_heads["heatmap"] = self._make_output_head(
             backbone_channels,
             num_classes,
-            fill_bias=heatmap_bias          # use heatmap_bias for heatmap output
+            fill_bias=fill_bias["heatmap"]
         )
         self.head_loss_fn["heatmap"] = FocalLossWithLogits(alpha=2., beta=4.)       # focal loss for heatmap
 
@@ -62,7 +66,7 @@ class CenterNet(pl.LightningModule):
             head = self._make_output_head(
                 backbone_channels,
                 _output_head_channels[h],
-                fill_bias=0                 # set bias to 0
+                fill_bias=fill_bias[h]
             )
             # loss for size and offset head should be either L1Loss or SmoothL1Loss
             # cornernet uses smooth l1 loss, centernet uses l1 loss
@@ -88,7 +92,7 @@ class CenterNet(pl.LightningModule):
         relu = nn.ReLU(inplace=True)
         conv2 = nn.Conv2d(in_channels, out_channels, 1)
 
-        if fill_bias != None:
+        if fill_bias is not None:
             conv2.bias.data.fill_(fill_bias)
 
         output_head = nn.Sequential(conv1, relu, conv2)
@@ -108,7 +112,7 @@ class CenterNet(pl.LightningModule):
         
         return output
 
-    def compute_loss(self, output_maps: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]):
+    def compute_loss(self, output_maps: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
         """Return a dictionary of losses for each output head. This method is called during the training step
         """
         bboxes = targets["bboxes"]              # ND4
@@ -145,21 +149,11 @@ class CenterNet(pl.LightningModule):
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
-        losses["heatmap"] = torch.tensor(0., dtype=torch.float32, device=self.device)
-        for b in range(batch_size):
-            # render target heatmap and accumulate focal loss
-            # 2 versions: cornernet (original) and ttfnet
-            target_heatmap = render_target_heatmap_cornernet(
-                heatmap.shape[1:],
-                out_bboxes[b],
-                labels[b],
-                mask[b],
-                device=self.device
-            )
-            losses["heatmap"] += self.head_loss_fn["heatmap"](heatmap[b], target_heatmap)
+        target_heatmap = render_target_heatmap_cornernet(heatmap.shape, out_bboxes, labels, mask, device=self.device)
+        losses["heatmap"] = self.head_loss_fn["heatmap"](heatmap, target_heatmap)
 
         # average over number of detections
-        N = torch.sum(mask) + 1e-8
+        N = torch.sum(mask) + eps
         losses["heatmap"] /= N
         losses["size"] /= N
         losses["offset"] /= N
@@ -225,6 +219,10 @@ class CenterNet(pl.LightningModule):
         self.log("train/total_loss", total_loss)
         self.log("epoch_frac", self.global_step / self.steps_per_epoch)     # log this to view graph with epoch as x-axis
 
+        self.log_histogram("output_values/heatmap", encoded_output["heatmap"])
+        self.log_histogram("output_values/size", encoded_output["size"])
+        self.log_histogram("output_values/offset", encoded_output["offset"])
+
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -255,13 +253,6 @@ class CenterNet(pl.LightningModule):
             "fp": class_fp,
         }
 
-        # return these for logging image callback
-        if batch_idx == 0:
-            result["detections"] = pred_detections
-            result["encoded_output"] = encoded_output
-            # self.log("val/size_output", encoded_output["size"].view(-1))
-            # self.log("val/offset_output", encoded_output["offset"].view(-1))
-    
         return result
 
     def validation_epoch_end(self, outputs):
@@ -272,6 +263,9 @@ class CenterNet(pl.LightningModule):
             class_fp += batch["fp"]
         
         precision = class_tp / (class_tp + class_fp + 1e-8)
+        for i in range(1, precision.shape[0]):
+            np.maximum(precision[i],  precision[i-1], out=precision[i])
+
         ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
         mAP = np.average(ap)                    # average over classes to get mAP
 
@@ -279,8 +273,8 @@ class CenterNet(pl.LightningModule):
             self.log(f"AP50/class_{i:02d}", class_ap)
         
         self.log("val/mAP50", mAP)
-        self.log("val/AP50_person", ap[1])
-        self.log("val/AP50_car", ap[3])
+        self.log("val/AP50_person", ap[0])
+        self.log("val/AP50_car", ap[2])
 
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], detection_threshold: float = 0.5):
@@ -306,6 +300,15 @@ class CenterNet(pl.LightningModule):
         
         return self._steps_per_epoch
 
+    def log_histogram(self, name: str, values: torch.Tensor):
+        flatten_values = values.detach().view(-1).cpu().float().numpy()
+
+        if isinstance(self.logger, TensorBoardLogger):
+            self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
+        
+        elif isinstance(self.logger, WandbLogger):
+            self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
+
     def register_optimizer(self, optimizer_cfg: Dict):
         self.optimizer_cfg = optimizer_cfg
 
@@ -314,7 +317,7 @@ class CenterNet(pl.LightningModule):
 
     # lightning method
     def configure_optimizers(self):
-        if self.optimizer_cfg == None:
+        if self.optimizer_cfg is None:
             warnings.warn("Optimizer config was not specified. Using adam optimizer with lr=1e-3")
             optimizer_params = dict(lr=1e-3)
             self.optimizer_cfg = dict(name="Adam", params=optimizer_params)

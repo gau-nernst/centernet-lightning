@@ -36,11 +36,9 @@ class FocalLossWithLogits(nn.Module):
         return loss
 
 def render_target_heatmap_ttfnet(
-    shape: Iterable,
-    # centers: torch.Tensor,
-    # sizes: torch.Tensor,
+    heatmap_shape: Iterable,
     bboxes: torch.Tensor,
-    indices: torch.Tensor,
+    labels: torch.Tensor,
     mask: torch.Tensor, 
     alpha: float = 0.54,
     device: str = "cpu",
@@ -50,89 +48,104 @@ def render_target_heatmap_ttfnet(
 
     Reference implementation https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L241
     """
-    heatmap = torch.zeros(shape, dtype=torch.float32, device=device)
+    batch_size, _, img_width, img_height = heatmap_shape
+    heatmap = torch.zeros(heatmap_shape, dtype=torch.float32, device=device)
     box_x = bboxes[...,0].long()
     box_y = bboxes[...,1].long()
     box_w = bboxes[...,2]
     box_h = bboxes[...,3]
-    indices = indices.long()
+    labels = labels.long()
 
     # From TTFNet
-    var_w = torch.square(alpha * box_w / 6)
-    var_h = torch.square(alpha * box_h / 6)
+    var_width = torch.square(alpha * box_w / 6)
+    var_height = torch.square(alpha * box_h / 6)
 
     # a matrix of (x,y)
     grid_y, grid_x = torch.meshgrid([
-        torch.arange(shape[1], dtype=torch.float32, device=device),
-        torch.arange(shape[2], dtype=torch.float32, device=device)
+        torch.arange(img_height, dtype=torch.float32, device=device),
+        torch.arange(img_width, dtype=torch.float32, device=device)
     ])
 
-    # iterate over the detections
-    for i, m in enumerate(mask):
-        if m == 0:
-            continue
-        idx = indices[i]
+    for b in range(batch_size):
+        for i, m in enumerate(mask[b]):
+            if m == 0:
+                continue
+            idx = labels[b][i]
+            x = box_x[b][i]
+            y = box_y[b][i]
+            var_w = var_width[b][i]
+            var_h = var_height[b][i]
 
-        # gaussian kernel
-        radius_sq = (box_x[i] - grid_x)**2 / (2*var_w[i] + eps) + (box_y[i] - grid_y)**2 / (2*var_h[i] + eps)
-        gaussian_kernel = torch.exp(-radius_sq)
-        heatmap[idx] = torch.maximum(heatmap[idx], gaussian_kernel)
+            # gaussian kernel
+            radius_sq = (x - grid_x)**2 / (2*var_w + eps) + (y - grid_y)**2 / (2*var_h + eps)
+            gaussian_kernel = torch.exp(-radius_sq)
+            heatmap[b, idx] = torch.maximum(heatmap[b, idx], gaussian_kernel)
 
     return heatmap
 
 def render_target_heatmap_cornernet(
-    shape: Iterable,
+    heatmap_shape: Iterable,
     bboxes: torch.Tensor,
-    indices: torch.Tensor,
+    labels: torch.Tensor,
     mask: torch.Tensor,
     min_overlap: float = 0.7,
     device: str = "cpu",
     eps: float = 1e-8
     ):
     """Render target heatmap using Gaussian kernel from detections' bounding boxes. Using CornetNet method
+    
+    Args
+        heatmap_shape: N x num_classes x 128 x 128
+        bboxes: shape N x num_detections x 4
+        labels: shape N x num_detections
+        mask: shape N x num_detections
     """
     # Reference implementations
     # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_gt.py
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/utils.py
-    heatmap = torch.zeros(shape, dtype=torch.float32, device=device)
-    img_width, img_height = shape[-2:]
+    batch_size, _, img_width, img_height = heatmap_shape
+    heatmap = torch.zeros(heatmap_shape, dtype=torch.float32, device=device)
     box_x = bboxes[...,0].long()
     box_y = bboxes[...,1].long()
     box_w = bboxes[...,2]
     box_h = bboxes[...,3]
+    labels = labels.long()
 
     # calculate gaussian radii for all detections in an image
     radius = cornernet_gaussian_radius(box_w, box_h, min_overlap=min_overlap)
-    radius = torch.clamp_min(radius, 0).long()
+    radius = torch.clamp_min(radius, 0)
 
     diameter = 2 * radius + 1
-    var = torch.square(diameter / 6)                    # sigma = diameter / 6
+    variance = torch.square(diameter / 6)    # sigma = diameter / 6
+    radius = radius.long()              # convert to integer after calculating diameter
 
-    for i, m in enumerate(mask):
-        if m == 0:
-            continue
-        idx = indices[i]
-        x = box_x[i]
-        y = box_y[i]
-        r = radius[i]
+    for b in range(batch_size):
+        for i, m in enumerate(mask[b]):
+            if m == 0:
+                continue
+            idx = labels[b][i]
+            x = box_x[b][i]
+            y = box_y[b][i]
+            var = variance[b][i]
+            r = radius[b][i]
 
-        # replace np.ogrid with torch.meshgrid since pytorch does not have ogrid
-        grid_y, grid_x = torch.meshgrid([
-            torch.arange(-r, r+1, dtype=torch.float32, device=device),
-            torch.arange(-r, r+1, dtype=torch.float32, device=device)
-        ])
+            # replace np.ogrid with torch.meshgrid since pytorch does not have ogrid
+            grid_y, grid_x = torch.meshgrid([
+                torch.arange(-r, r+1, dtype=torch.float32, device=device),
+                torch.arange(-r, r+1, dtype=torch.float32, device=device)
+            ])
 
-        gaussian = torch.exp(-(grid_x**2 + grid_y**2) / (2*var[i] + eps))
-        gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0      # clamping? is this necessary?
+            gaussian = torch.exp(-(grid_x**2 + grid_y**2) / (2*var + eps))
+            gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0      # clamping? is this necessary?
 
-        left   = min(x, r)
-        right  = min(img_width - x, r + 1).long()
-        top    = min(y, r)
-        bottom = min(img_height - y, r + 1).long()
+            left   = min(x, r)
+            right  = min(img_width - x, r + 1)
+            top    = min(y, r)
+            bottom = min(img_height - y, r + 1)
 
-        masked_heatmap = heatmap[idx, y - top:y + bottom, x - left:x + right]
-        masked_gaussian = gaussian[r - top:r + bottom, r - left:r + right]
-        torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
+            masked_heatmap = heatmap[b, idx, y - top:y + bottom, x - left:x + right]
+            masked_gaussian = gaussian[r - top:r + bottom, r - left:r + right]
+            torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
 
     return heatmap
 
