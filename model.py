@@ -154,7 +154,6 @@ class CenterNet(pl.LightningModule):
 
         # average over number of detections
         N = torch.sum(mask) + eps
-        losses["heatmap"] /= N
         losses["size"] /= N
         losses["offset"] /= N
 
