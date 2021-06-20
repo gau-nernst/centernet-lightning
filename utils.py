@@ -103,18 +103,13 @@ def draw_bboxes(
         bboxes[:,[1,3]] *= img.shape[0]
     bboxes = bboxes.astype(int)
 
-    if scores is None:
-        scores = [""]*len(labels)
-    else:
-        scores = scores.round(2)
-
     for i in range(bboxes.shape[0]):
         if score_threshold and scores[i] < score_threshold:
             continue
         
         pt1 = bboxes[i,:2]
         pt2 = bboxes[i,2:]
-        text = f"{labels[i]} {scores[i]}"
+        text = f"{labels[i]}" if scores is None else f"{labels[i]} {scores[i]:.2f}"
 
         text_size = 1
         (text_width, text_height), _ = cv2.getTextSize(text, font, text_size, text_size)
