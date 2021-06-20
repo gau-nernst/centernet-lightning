@@ -1,6 +1,7 @@
+# this config file is for debug only
 model:
   backbone:
-    name: resnet34-fpn
+    name: resnet18
     upsample_channels: [256, 128, 64]
     upsample_block:
       upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
@@ -13,8 +14,8 @@ model:
     other_heads: [size, offset]
     fill_bias: 
       heatmap: -2.19
-      size: 0
-      offset: 0
+      size: null
+      offset: null
     loss_weights:
       size: 0.1
       offset: 1
@@ -29,10 +30,10 @@ model:
       momentum: 0.9
       weight_decay: 0.0001
 
-  # lr_scheduler:
-  #   name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
-  #   params:
-  #     max_lr: 0.02
+  lr_scheduler:
+    name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
+    params:
+      max_lr: 0.02
 
 data:
   train:
@@ -40,8 +41,8 @@ data:
     annotation_file: datasets/COCO/annotations/instances_train2017.json
     coco: True
     dataloader_params:
-      batch_size: 32
-      num_workers: 8
+      batch_size: 4
+      num_workers: 2
       shuffle: True
       pin_memory: True
     transforms:
@@ -66,8 +67,8 @@ data:
     annotation_file: datasets/COCO/annotations/instances_val2017.json
     coco: True
     dataloader_params:
-      batch_size: 32
-      num_workers: 8
+      batch_size: 4
+      num_workers: 2
       shuffle: False
       pin_memory: True
     transforms:
@@ -80,8 +81,9 @@ trainer:
   params:
     gpus: 1
     precision: 16
-    max_epochs: 10
-    limit_val_batches: 20
+    max_epochs: 1
+    limit_train_batches: 0.01
+    limit_val_batches: 0.05
     val_check_interval: 0.5
     benchmark: True
     gradient_clip_val: 35     # mmdetection

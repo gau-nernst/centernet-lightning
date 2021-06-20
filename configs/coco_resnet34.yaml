@@ -11,7 +11,10 @@ model:
   num_classes: 80
   output_heads:
     other_heads: [size, offset]
-    heatmap_bias: -2.19
+    fill_bias: 
+      heatmap: -2.19
+      size: 0
+      offset: 0
     loss_weights:
       size: 0.1
       offset: 1
@@ -33,9 +36,9 @@ model:
 
 data:
   train:
-    data_dir: datasets/COCO
+    data_dir: datasets/COCO/train2017
+    annotation_file: datasets/COCO/annotations/instances_train2017.json
     coco: True
-    coco_version: train2017
     dataloader_params:
       batch_size: 32
       num_workers: 8
@@ -59,9 +62,9 @@ data:
           saturation: 0.4
 
   validation:
-    data_dir: datasets/COCO
+    data_dir: datasets/COCO/val2017
+    annotation_file: datasets/COCO/annotations/instances_val2017.json
     coco: True
-    coco_version: val2017
     dataloader_params:
       batch_size: 32
       num_workers: 8
