@@ -149,7 +149,7 @@ class CenterNet(pl.LightningModule):
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
-        target_heatmap = render_target_heatmap_cornernet(heatmap.shape, out_bboxes, labels, mask, device=self.device)
+        target_heatmap = render_target_heatmap_cornernet(heatmap.shape, out_bboxes, labels, mask, device=self.device, dtype=heatmap.dtype)
         losses["heatmap"] = self.head_loss_fn["heatmap"](heatmap, target_heatmap)
 
         # average over number of detections
@@ -173,8 +173,8 @@ class CenterNet(pl.LightningModule):
         offset_map = encoded_output["offset"].view(batch_size, 2, -1)
 
         # obtain topk from heatmap
-        # heatmap = torch.sigmoid(encoded_output["heatmap"])  # convert to probability NOTE: is this necessary? sigmoid is a monotonic increasing function. max order will be preserved
-        
+        # NOTE: must apply sigmoid before max pool
+        heatmap = torch.sigmoid(encoded_output["heatmap"])
         local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
         nms_mask = (heatmap == local_peaks)  # pseudo-nms, only consider local peaks
         heatmap = nms_mask.float() * heatmap
@@ -182,8 +182,7 @@ class CenterNet(pl.LightningModule):
         # flatten to N(CHW) to apply topk
         heatmap = heatmap.view(batch_size, -1)
         topk_scores, topk_indices = torch.topk(heatmap, num_detections)
-        topk_scores = torch.sigmoid(topk_scores)
-
+        
         # restore flattened indices to class, xy indices
         topk_classes    = topk_indices // (out_h*out_w)
         topk_xy_indices = topk_indices % (out_h*out_w)

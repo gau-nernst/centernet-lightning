@@ -26,6 +26,7 @@ def train(config: Union[str, Dict]):
 
     model = build_centernet_from_cfg(config["model"])
     coco_datamodule = COCODataModule(**config["data"])
+    coco_datamodule.prepare_data()
     
     if "logger" in config["trainer"]:
         logger_name = config["trainer"]["logger"]["name"]
