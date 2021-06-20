@@ -17,27 +17,23 @@ from pycocotools.coco import COCO
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-def prepare_coco_detection(data_dir: str, coco_version: str):
-    ann_dir = os.path.join(data_dir, "annotations")
-    ann_file = os.path.join(ann_dir, f"instances_{coco_version}.json")
-
-    save_dir = os.path.join(ann_dir, coco_version)
+def prepare_coco_detection(ann_file: str, save_dir: str, overwrite: bool = False):
     os.makedirs(save_dir, exist_ok=True)
-    detection_file = os.path.join(save_dir, "detections.pkl")
+    detection_file     = os.path.join(save_dir, "detections.pkl")
     label_to_name_file = os.path.join(save_dir, "label_to_name.json")
-    label_to_id_file = os.path.join(save_dir, "label_to_id.json")
+    label_to_id_file   = os.path.join(save_dir, "label_to_id.json")
 
     # if already exist on disk, don't do anything
-    if os.path.exists(detection_file) and os.path.exists(label_to_name_file) and os.path.exists(label_to_id_file):
+    if not overwrite and os.path.exists(detection_file) and os.path.exists(label_to_name_file) and os.path.exists(label_to_id_file):
         return
 
     # extract only bboxes and ids data, otherwise train set annotations is too large
     coco = COCO(ann_file)
     categories = OrderedDict(coco.cats)
     
-    label_to_id = {i: v["id"] for i, v in enumerate(categories.values())}
+    label_to_id   = {i: v["id"] for i, v in enumerate(categories.values())}
     label_to_name = {i: v["name"] for i, v in enumerate(categories.values())}
-    id_to_label = {v: k for k, v in label_to_id.items()}
+    id_to_label   = {v: k for k, v in label_to_id.items()}
 
     # save to disk
     with open(label_to_name_file, "w") as f:
@@ -81,15 +77,33 @@ def prepare_coco_detection(data_dir: str, coco_version: str):
 
     del coco
 
+def get_coco_subset(detection_file: str, indices: Iterable = None):
+    if not indices:
+        indices = range(16)
+    elif isinstance(indices, int):
+        indices = range(indices)
+     
+    with open(detection_file, "rb") as f:
+        detection = pickle.load(f)
+    
+    sub_detection = {
+        "img_names": [],
+        "bboxes": [],
+        "labels": []
+    }
+    for i in indices:
+        for k in sub_detection.keys():
+            sub_detection[k].append(detection[k][i])
+    
+    return sub_detection
+
 class COCODataset(Dataset):
-    def __init__(self, data_dir: str, coco_version: str, transforms: A.Compose = None):
+    def __init__(self, data_dir: str, detection_file: str, transforms: A.Compose = None):
         super(COCODataset, self).__init__()
-        detection_file = os.path.join(data_dir, "annotations", coco_version, "detections.pkl")
-        
         with open(detection_file, "rb") as f:
             detection = pickle.load(f)
 
-        if transforms == None:
+        if transforms is None:
             warnings.warn("transforms is not specified. Default to normalize with ImageNet and resize to 512x512")
             # use Albumentation resize to handle bbox resizing also
             # centernet resize input to 512 and 512
@@ -99,11 +113,12 @@ class COCODataset(Dataset):
                 ToTensorV2()
             ], bbox_params=A.BboxParams(format='coco', min_area=1024, min_visibility=0.1, label_fields=["labels"]))
 
-        self.img_dir = os.path.join(data_dir, coco_version)
-        self.img_names = detection["img_names"]
-        self.bboxes = detection["bboxes"]
-        self.labels = detection["labels"]
+        self.img_dir = data_dir
         self.transforms = transforms
+
+        self.img_names = detection["img_names"]
+        self.bboxes    = detection["bboxes"]
+        self.labels    = detection["labels"]
 
     def __getitem__(self, index: int):
         img_path = os.path.join(self.img_dir, self.img_names[index])
@@ -120,6 +135,7 @@ class COCODataset(Dataset):
         bboxes = augmented["bboxes"]
         labels = augmented["labels"]
 
+        # convert xywh to cxcywh
         for i, box in enumerate(bboxes):
             x, y, w, h = box
             cx = x + w / 2
@@ -146,8 +162,8 @@ class COCODataModule(pl.LightningDataModule):
         self.test_cfg = test
 
         self.train_transforms = self._parse_transforms(train["transforms"])
-        self.val_transforms = self._parse_transforms(validation["transforms"]) if validation else None
-        self.test_transforms = self._parse_transforms(test["transforms"]) if test else None
+        self.val_transforms   = self._parse_transforms(validation["transforms"]) if validation else None
+        self.test_transforms  = self._parse_transforms(test["transforms"]) if test else None
 
     def _parse_transforms(self, transforms_cfg):
         transforms = []
@@ -164,19 +180,19 @@ class COCODataModule(pl.LightningDataModule):
         return transforms
 
     def prepare_data(self):
-        prepare_coco_detection(self.train_cfg["data_dir"], self.train_cfg["coco_version"])
-        prepare_coco_detection(self.val_cfg["data_dir"], self.val_cfg["coco_version"]) if self.val_cfg else None
+        prepare_coco_detection(self.train_cfg["annotation_file"], self.train_cfg["data_dir"])
+        prepare_coco_detection(self.val_cfg["annotation_file"], self.val_cfg["data_dir"]) if self.val_cfg else None
 
     def setup(self, stage: str):
         if stage in (None, "fit"):
             self.coco_train = COCODataset(
                 self.train_cfg["data_dir"],
-                self.train_cfg["coco_version"],
+                os.path.join(self.train_cfg["data_dir"], "detections.pkl"),
                 transforms=self.train_transforms
             )
             self.coco_val = COCODataset(
                 self.val_cfg["data_dir"],
-                self.val_cfg["coco_version"],
+                os.path.join(self.val_cfg["data_dir"], "detections.pkl"),
                 transforms=self.val_transforms
             )
 
@@ -230,20 +246,15 @@ def collate_detections_with_padding(batch: Iterable[Dict[str, np.ndarray]], pad_
 class InferenceDataset(Dataset):
     """Dataset used for inference. Each item is a dict with keys `image`, `original_height`, and `original_width`.
     """
-    def __init__(self, data_dir: str, resize_height: int = 512, resize_width: int = 512):
-        assert os.path.exists(data_dir), f"{data_dir} does not exist"
-
-        supported_formats = ["bmp", "jpeg", "jpg", "png"]   # cv2 is used to read the image. add image extension here if you need to read other formats
-        files = [x for x in os.listdir(data_dir) if x.split(".")[-1].lower() in supported_formats]
-
+    def __init__(self, data_dir: str, img_names: Iterable[str], resize_height: int = 512, resize_width: int = 512):
         transforms = A.Compose([
             A.Resize(height=resize_height, width=resize_width),
             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
             ToTensorV2()
         ])
 
-        self.data_dir = data_dir
-        self.img_names = files
+        self.data_dir   = data_dir
+        self.img_names  = img_names
         self.transforms = transforms
 
     def __getitem__(self, index: int):
