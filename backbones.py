@@ -7,6 +7,13 @@ from torch import nn
 import torchvision.models.resnet as resnet
 import torchvision.models.mobilenet as mobilenet
 
+__all__ = [
+    "get_resnet_stages", "get_mobilenet_stages",
+    "SimpleBackbone", "FPNBackbone",
+    "build_simple_backbone", "build_fpn_backbone",
+    "build_backbone"
+]
+
 _resnet_channels = {
     "resnet18": [64, 128, 256, 512],
     "resnet34": [64, 128, 256, 512],
@@ -73,7 +80,7 @@ class ConvUpsampleBlock(nn.Module):
             warnings.warn(f"{conv_type} is not supported. Fall back to normal convolution")
             conv_type = "normal"
         
-        if deconv_params == None:
+        if deconv_params is None:
             deconv_params = dict(kernel_size=4, stride=2, padding=1, output_padding=0, bias=False)
 
         if conv_type == "dcn":
@@ -156,7 +163,7 @@ class SimpleBackbone(nn.Module):
         self.downsample = downsample
 
         # fill default values
-        if conv_upsample_block == None:
+        if conv_upsample_block is None:
             conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_params=None, init_bilinear=True)
 
         # build upsample stage
@@ -231,10 +238,10 @@ class FPNBackbone(nn.Module):
         self.conv_upsample_layers = nn.ModuleList()
 
         # fill default values
-        if skip_connection == None:
+        if skip_connection is None:
             skip_connection = dict(kernel_size=1)
         
-        if conv_upsample_block == None:
+        if conv_upsample_block is None:
             conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_params=None, init_bilinear=True)
 
         # build skip connections
