@@ -6,31 +6,29 @@ import json
 import pickle
 
 import cv2
-from torch.utils.data import Dataset, DataLoader
-import pytorch_lightning as pl
+from torch.utils.data import Dataset
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
 from pycocotools.coco import COCO
 
-from .utils import IMAGENET_MEAN, IMAGENET_STD, collate_detections_with_padding
+from .utils import get_default_transforms
 
-def prepare_coco_detection(ann_file: str, save_dir: str, overwrite: bool = False):
-    os.makedirs(save_dir, exist_ok=True)
-    detection_file     = os.path.join(save_dir, "detections.pkl")
-    label_to_name_file = os.path.join(save_dir, "label_to_name.json")
-    label_to_id_file   = os.path.join(save_dir, "label_to_id.json")
+def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
+    ann_file = os.path.join(ann_dir, f"instances_{split}.json")
+    det_file = os.path.join(ann_dir, f"detections_{split}.pkl")
+    label_to_name_file = os.path.join(ann_dir, "label_to_name.json")
+    label_to_id_file   = os.path.join(ann_dir, "label_to_id.json")
 
     # if already exist on disk, don't do anything
-    if not overwrite and os.path.exists(detection_file) and os.path.exists(label_to_name_file) and os.path.exists(label_to_id_file):
+    if not overwrite and os.path.exists(det_file) and os.path.exists(label_to_name_file) and os.path.exists(label_to_id_file):
         return
 
     # extract only bboxes and ids data, otherwise train set annotations is too large
     coco = COCO(ann_file)
     categories = OrderedDict(coco.cats)
     
-    label_to_id   = {i: v["id"] for i, v in enumerate(categories.values())}
-    label_to_name = {i: v["name"] for i, v in enumerate(categories.values())}
-    id_to_label   = {v: k for k, v in label_to_id.items()}
+    label_to_id   = {i: v["id"] for i,v in enumerate(categories.values())}
+    label_to_name = {i: v["name"] for i,v in enumerate(categories.values())}
+    id_to_label   = {v: k for k,v in label_to_id.items()}
 
     # save to disk
     with open(label_to_name_file, "w") as f:
@@ -69,7 +67,7 @@ def prepare_coco_detection(ann_file: str, save_dir: str, overwrite: bool = False
         "bboxes": bboxes,
         "labels": labels
     }
-    with open(detection_file, "wb") as f:
+    with open(det_file, "wb") as f:
         pickle.dump(detection, f)          # save to disk
 
     del coco
@@ -95,20 +93,28 @@ def get_coco_subset(detection_file: str, indices: Iterable = None):
     return sub_detection
 
 class COCODataset(Dataset):
-    def __init__(self, data_dir: str, detection_file: str, transforms: A.Compose = None):
+    """Dataset class for dataset in COCO format
+
+    Args:
+        data_dir: root directory, which contains folder `annotations` and `images`
+        split: the split to use e.g. `train2017`. Annotation file e.g. `instances_train2017.json` must be present in the folder `annotations`. Image folder of the split e.g. `train2017` must be present in the folder `images`
+        transforms: albumentation transform
+    """
+    def __init__(self, data_dir: str, split: str, transforms: A.Compose = None):
         super(COCODataset, self).__init__()
+        ann_dir = os.path.join(data_dir, "annotataions")
+        detection_file = os.path.join(ann_dir, "detections.pkl")
+
+        # extract necessary info for detection
+        if not os.path.exists(detection_file):
+            prepare_coco_detection(ann_dir, split)
+
         with open(detection_file, "rb") as f:
             detection = pickle.load(f)
 
         if transforms is None:
             warnings.warn("transforms is not specified. Default to normalize with ImageNet and resize to 512x512")
-            # use Albumentation resize to handle bbox resizing also
-            # centernet resize input to 512 and 512
-            transforms = A.Compose([
-                A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
-                A.Resize(512, 512),
-                ToTensorV2()
-            ], bbox_params=A.BboxParams(format='coco', min_area=1024, min_visibility=0.1, label_fields=["labels"]))
+            transforms = get_default_transforms(format="coco")
 
         self.img_dir = data_dir
         self.transforms = transforms
@@ -148,63 +154,3 @@ class COCODataset(Dataset):
 
     def __len__(self):
         return len(self.img_names)
-
-class COCODataModule(pl.LightningDataModule):
-    """Lightning Data Module, used for training
-    """
-    def __init__(self, train: Dict, validation: Dict = None, test: Dict = None):
-        super().__init__()
-        self.train_cfg = train
-        self.val_cfg = validation
-        self.test_cfg = test
-
-        self.train_transforms = self._parse_transforms(train["transforms"])
-        self.val_transforms   = self._parse_transforms(validation["transforms"]) if validation else None
-        self.test_transforms  = self._parse_transforms(test["transforms"]) if test else None
-
-    def _parse_transforms(self, transforms_cfg):
-        transforms = []
-        for x in transforms_cfg:
-            transf = A.__dict__[x["name"]](**x["params"])
-            transforms.append(transf)
-
-        transforms.append(A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255))
-        transforms.append(ToTensorV2())
-        transforms = A.Compose(
-            transforms,
-            bbox_params=A.BboxParams(format='coco', min_area=1024, min_visibility=0.1, label_fields=["labels"])
-        )
-        return transforms
-
-    def prepare_data(self):
-        prepare_coco_detection(self.train_cfg["annotation_file"], self.train_cfg["data_dir"])
-        prepare_coco_detection(self.val_cfg["annotation_file"], self.val_cfg["data_dir"]) if self.val_cfg else None
-
-    def setup(self, stage: str):
-        if stage in (None, "fit"):
-            self.coco_train = COCODataset(
-                self.train_cfg["data_dir"],
-                os.path.join(self.train_cfg["data_dir"], "detections.pkl"),
-                transforms=self.train_transforms
-            )
-            self.coco_val = COCODataset(
-                self.val_cfg["data_dir"],
-                os.path.join(self.val_cfg["data_dir"], "detections.pkl"),
-                transforms=self.val_transforms
-            )
-
-    def train_dataloader(self):
-        train_dataloader = DataLoader(
-            self.coco_train,
-            collate_fn=collate_detections_with_padding,
-            **self.train_cfg["dataloader_params"]
-        )
-        return train_dataloader
-
-    def val_dataloader(self):
-        val_dataloader = DataLoader(
-            self.coco_val,
-            collate_fn=collate_detections_with_padding,
-            **self.val_cfg["dataloader_params"]
-        )
-        return val_dataloader

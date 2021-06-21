@@ -2,9 +2,19 @@ from typing import Dict, Iterable
 
 import numpy as np
 import torch
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+def get_default_transforms(format="coco"):
+    transforms = A.Compose([
+        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
+        A.Resize(512, 512),
+        ToTensorV2()
+    ], bbox_params=A.BboxParams(format=format, min_area=1024, min_visibility=0.1, label_fields=["labels"]))
+    return transforms
 
 def collate_detections_with_padding(batch: Iterable[Dict[str, np.ndarray]], pad_value: int = 0):
     output = {key: [] for key in batch[0]}

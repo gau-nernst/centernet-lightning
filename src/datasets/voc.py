@@ -9,7 +9,25 @@ import pytorch_lightning as pl
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-from .utils import IMAGENET_MEAN, IMAGENET_STD, collate_detections_with_padding
+from .utils import IMAGENET_MEAN, IMAGENET_STD, collate_detections_with_padding, get_default_transforms
+
+def process_voc_xml(self, ann_file):
+    tree = ET.parse(ann_file)
+    root = tree.getroot()
+
+    names = []
+    boxes = []
+    for x in root.iter("object"):
+        name = x.find("name").text
+        names.append(name)
+        
+        x1 = int(x.find("bndbox/xmin").text)
+        y1 = int(x.find("bndbox/ymin").text)
+        x2 = int(x.find("bndbox/xmax").text)
+        y2 = int(x.find("bndbox/ymax").text)
+        boxes.append([x1, y1, x2, y2])
+
+    return names, boxes
 
 class VOCDataset(Dataset):
     """Dataset class for data in PASCAL VOC format. Only detection is supported
@@ -24,44 +42,25 @@ class VOCDataset(Dataset):
         super().__init__()
         if transforms is None:
             warnings.warn("transforms is not specified. Default to normalize with ImageNet and resize to 512x512")
-            # use Albumentation resize to handle bbox resizing also
-            # centernet resize input to 512 and 512
-            transforms = A.Compose([
-                A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
-                A.Resize(512, 512),
-                ToTensorV2()
-            ], bbox_params=A.BboxParams(format='pascal_voc', min_area=1024, min_visibility=0.1, label_fields=["labels"]))
+            transforms = get_default_transforms(format="pascal_voc")
         
-        split_file = os.path.join(data_dir, "ImageSets", "Main", split)
+        img_list = os.path.join(data_dir, "ImageSets", "Main", f"{split}.txt")
         
-        with open(split_file, "r") as f:
+        with open(img_list, "r") as f:
             img_names = [x.rstrip() for x in f]
         
         labels = []
         bboxes = []
         ann_dir = os.path.join(data_dir, "Annotations")
         for img_name in img_names:
-            ann_file = os.path.join(ann_dir, img_name) + ".xml"
-            tree = ET.parse(ann_file)
-            root = tree.getroot()
+            ann_file = os.path.join(ann_dir, f"{img_name}.xml")
 
-            names = []
-            boxes = []
-            for x in root.iter("object"):
-                name = x.find("name").text
-                names.append(name)
-                
-                x1 = int(x.find("bndbox/xmin").text)
-                y1 = int(x.find("bndbox/ymin").text)
-                x2 = int(x.find("bndbox/xmax").text)
-                y2 = int(x.find("bndbox/ymax").text)
-                boxes.append([x1, y1, x2, y2])
-                
+            names, boxes = process_voc_xml(ann_file)
+            if name_to_label:
+                names = [name_to_label[x] for x in names]
+
             labels.append(names)
             bboxes.append(boxes)
-
-        if name_to_label:
-            labels = [[name_to_label[x] for x in img_labels] for img_labels in labels]
 
         self.img_names = img_names
         self.transforms = transforms
@@ -71,12 +70,9 @@ class VOCDataset(Dataset):
 
     def __getitem__(self, index):
         img_name = self.img_names[index]
-        img_file = os.path.join(self.img_dir, img_name) + ".jpg"
-        img = cv2.imread(img_file)
-        try:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        except:
-            print(img_name)
+        img_name = os.path.join(self.img_dir, f"{img_name}.jpg")
+        img = cv2.imread(img_name)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         bboxes = self.bboxes[index]
         labels = self.labels[index]
