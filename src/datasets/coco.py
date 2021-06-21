@@ -1,21 +1,18 @@
 import warnings
 from typing import Dict, Iterable
 import os
-import pickle
-import json
 from collections import OrderedDict
+import json
+import pickle
 
 import cv2
-import numpy as np
-import torch
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from pycocotools.coco import COCO
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
+from .utils import IMAGENET_MEAN, IMAGENET_STD, collate_detections_with_padding
 
 def prepare_coco_detection(ann_file: str, save_dir: str, overwrite: bool = False):
     os.makedirs(save_dir, exist_ok=True)
@@ -211,66 +208,3 @@ class COCODataModule(pl.LightningDataModule):
             **self.val_cfg["dataloader_params"]
         )
         return val_dataloader
-
-def collate_detections_with_padding(batch: Iterable[Dict[str, np.ndarray]], pad_value: int = 0):
-    output = {key: [] for key in batch[0]}
-    output["mask"] = []
-    max_size = 0
-
-    # collate items to a list and find max number of detection in this batch
-    for item in batch:
-        for key, value in item.items():
-            output[key].append(value)
-        max_size = max(max_size, len(item["labels"]))
-    
-    # pad labels and masks to max length
-    for i in range(len(batch)):
-        item_size = len(output["labels"][i])
-        output["mask"].append([1]*item_size)
-
-        for _ in range(max_size - item_size):
-            output["bboxes"][i].append([pad_value]*4)
-            output["labels"][i].append(pad_value)
-            output["mask"][i].append(0)    
-    
-    # image is a list of tensor -> use torch.stack
-    # the rest are nested lists -> use torch.tensor
-    for key, value in output.items():
-        if key != "image":
-            output[key] = torch.tensor(value)
-        else:
-            output[key] = torch.stack(value, dim=0)
-
-    return output
-
-class InferenceDataset(Dataset):
-    """Dataset used for inference. Each item is a dict with keys `image`, `original_height`, and `original_width`.
-    """
-    def __init__(self, data_dir: str, img_names: Iterable[str], resize_height: int = 512, resize_width: int = 512):
-        transforms = A.Compose([
-            A.Resize(height=resize_height, width=resize_width),
-            A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
-            ToTensorV2()
-        ])
-
-        self.data_dir   = data_dir
-        self.img_names  = img_names
-        self.transforms = transforms
-
-    def __getitem__(self, index: int):
-        img = os.path.join(self.data_dir, self.img_names[index])
-        img = cv2.imread(img)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        height, width, _ = img.shape
-        img = self.transforms(image=img)["image"]
-
-        item = {
-            "image": img,
-            "original_height": height,
-            "original_width": width
-        }
-        return item
-    
-    def __len__(self):
-        return len(self.img_names)

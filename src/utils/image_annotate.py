@@ -1,80 +1,20 @@
-from typing import  Dict, Iterable, Tuple
+from typing import Tuple, Iterable
 import pickle
-import numpy as np
-import torch
 
+import numpy as np
 import cv2
+import torch
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import wandb
 
-from datasets import COCODataset, InferenceDataset, IMAGENET_MEAN, IMAGENET_STD, get_coco_subset
-
-__all__ = [
-    "convert_xywh_to_cxcywh", "convert_cxcywh_to_xywh",
-    "convert_xywh_to_x1y1x2y2", "convert_x1y1x2y2_to_xywh",
-    "convert_cxcywh_to_x1y1x2y2", "convert_x1y1x2y2_to_cxcywh",
-    "draw_bboxes", "apply_mpl_cmap", "LogImageCallback",
-    "make_image_grid", "convert_bboxes_to_wandb"
-]
+from ..datasets import IMAGENET_MEAN, IMAGENET_STD, COCODataset
+from ..datasets.coco import get_coco_subset
+from .box import *
 
 RED = (1., 0., 0.)
 BLUE = (0., 0., 1.)
-
-def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=True):
-    """Convert bboxes from xywh format to cxcywh format. Default is inplace
-    """
-    if not inplace:
-        bboxes = bboxes.copy()
-
-    bboxes[...,0] += bboxes[...,2] / 2      # cx = x + w/2
-    bboxes[...,1] += bboxes[...,3] / 2      # cy = y + h/2
-    return bboxes
-
-def convert_cxcywh_to_xywh(bboxes: np.ndarray, inplace=True):
-    """Convert bboxes from cxcywh format to xywh format. Default is inplace
-    """
-    if not inplace:
-        bboxes = bboxes.copy()
-    
-    bboxes[...,0] -= bboxes[...,2] / 2      # x = cx - w/2
-    bboxes[...,1] -= bboxes[...,3] / 2      # y = cy - h/2
-    return bboxes
-
-def convert_xywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
-    if not inplace:
-        bboxes = bboxes.copy()
-    
-    bboxes[...,2] += bboxes[...,0]          # x2 = x1 + w
-    bboxes[...,3] += bboxes[...,1]          # y2 = x1 + h
-    return bboxes
-
-def convert_x1y1x2y2_to_xywh(bboxes: np.ndarray, inplace=True):
-    if not inplace:
-        bboxes = bboxes.copy()
-
-    bboxes[...,2] -= bboxes[...,0]          # w = x2 - x1
-    bboxes[...,3] -= bboxes[...,1]          # h = y2 - y1
-    return bboxes
-
-def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
-    """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
-    """
-    if not inplace:
-        bboxes = bboxes.copy()
-    
-    convert_cxcywh_to_xywh(bboxes)
-    convert_xywh_to_x1y1x2y2(bboxes)
-    return bboxes
-
-def convert_x1y1x2y2_to_cxcywh(bboxes: np.ndarray, inplace=True):
-    if not inplace:
-        bboxes = bboxes.copy()
-    
-    convert_x1y1x2y2_to_xywh(bboxes)
-    convert_xywh_to_cxcywh(bboxes)
-    return bboxes
 
 def draw_bboxes(
     img: np.ndarray,

@@ -9,9 +9,9 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import LearningRateMonitor
 
-from datasets import COCODataModule
-from model import build_centernet_from_cfg
-from utils import LogImageCallback
+from src.datasets import COCODataModule
+from src.models import build_centernet_from_cfg
+from src.utils import LogImageCallback
 
 def train(config: Union[str, Dict]):
     """Train CenterNet from a config.

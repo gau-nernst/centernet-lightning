@@ -1,6 +1,4 @@
-import os
-import yaml
-from typing import Dict, Union
+from typing import Dict
 import warnings
 
 import numpy as np
@@ -11,10 +9,11 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
-from backbones import build_backbone
-from losses import FocalLossWithLogits, render_target_heatmap_ttfnet, render_target_heatmap_cornernet
-from metrics import class_tpfp_batch
-from utils import convert_cxcywh_to_x1y1x2y2
+from ..backbones import build_backbone
+from ..losses import FocalLossWithLogits
+from ..losses.utils import render_target_heatmap_ttfnet, render_target_heatmap_cornernet
+from ..utils.metrics import class_tpfp_batch
+from ..utils import convert_cxcywh_to_x1y1x2y2
 
 __all__ = ["CenterNet", "build_centernet_from_cfg"]
 
@@ -345,21 +344,3 @@ class CenterNet(pl.LightningModule):
             }
         }
         return return_dict
-
-def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
-    """Build CenterNet from a confile file.
-
-    Args:
-        cfg_file (str or dict): Config file to build CenterNet, either path to the config file, or a config file dictionary
-    """
-    if type(cfg_file) == str:
-        assert os.path.exists(cfg_file), "Config file does not exist"
-        with open(cfg_file, "r", encoding="utf-8") as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
-            params = config["model"]
-
-    else:
-        params = cfg_file
-
-    model = CenterNet(**params)
-    return model

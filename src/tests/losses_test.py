@@ -1,5 +1,6 @@
 import torch
-from losses import *
+from ..losses import *
+from ..losses.utils import *
 
 class TestLosses:
     def test_render_target_heatmap(self):

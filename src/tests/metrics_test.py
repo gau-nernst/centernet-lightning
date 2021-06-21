@@ -1,5 +1,5 @@
 import numpy as np
-from metrics import compute_iou_matrix, tpfp_detections, class_tpfp_batch
+from ..utils.metrics import compute_iou_matrix, tpfp_detections, class_tpfp_batch
 
 class TestMetrics:
     pred_bboxes = np.array([

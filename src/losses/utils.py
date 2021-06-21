@@ -1,40 +1,6 @@
 from typing import Iterable, Tuple
 import numpy as np
 import torch
-from torch import nn
-import torch.nn.functional as F
-
-class FocalLossWithLogits(nn.Module):
-    """Implement Modified Focal Loss with Logits to improve numerical stability. This is originally from CornerNet
-    """
-    # reference implementations
-    # https://github.com/xingyizhou/CenterTrack/blob/master/src/lib/model/losses.py#L72
-    # default alpha and beta values taken from CenterTrack
-    def __init__(self, alpha: float=2., beta: float=4.):
-        super(FocalLossWithLogits, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-    
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # NOTE: targets is a 2D Gaussian
-        pos_mask = (targets == 1).float()
-        neg_mask = (targets < 1).float()
-
-        probs = torch.sigmoid(inputs)   # convert logits to probabilities
-
-        # use logsigmoid for numerical stability
-        pos_loss = -F.logsigmoid(inputs) * (1-probs)**self.alpha * pos_mask                         # loss at Gaussian peak
-        neg_loss = -F.logsigmoid(-inputs) * probs**self.alpha * (1-targets)**self.beta * neg_mask   # loss at everywhere else
-
-        pos_loss = pos_loss.sum()
-        neg_loss = neg_loss.sum()
-        N = pos_mask.sum()  # number of peaks = number of ground-truth detections
-        if N == 0:
-            loss = neg_loss
-        else:
-            loss = (pos_loss + neg_loss) / N
-
-        return loss
 
 def render_target_heatmap_ttfnet(
     heatmap_shape: Iterable,
@@ -83,6 +49,8 @@ def render_target_heatmap_ttfnet(
 
     return heatmap
 
+# NOTE: this might be slow because it starts many CUDA kernels on GPU. May be it's faster to create on CPU and transfer to GPU
+# NOTE: it's also possible to create 1 heatmap per batch, then calculate loss on 1 batch at a time
 def render_target_heatmap_cornernet(
     heatmap_shape: Iterable,
     bboxes: torch.Tensor,
@@ -124,14 +92,14 @@ def render_target_heatmap_cornernet(
     radius = radius.long()              # convert to integer after calculating diameter
 
     for b in range(batch_size):
-        for i, m in enumerate(mask[b]):
-            if m == 0:
+        for i in range(mask.shape[-1]):
+            if mask[b,i] == 0:
                 continue
-            idx = labels[b][i]
-            x = box_x[b][i]
-            y = box_y[b][i]
-            var = variance[b][i]
-            r = radius[b][i]
+            idx = labels[b,i]
+            x = box_x[b,i]
+            y = box_y[b,i]
+            var = variance[b,i]
+            r = radius[b,i]
 
             # replace np.ogrid with torch.meshgrid since pytorch does not have ogrid
             grid_y = torch.arange(-r, r+1, dtype=dtype, device=device).view(-1,1)

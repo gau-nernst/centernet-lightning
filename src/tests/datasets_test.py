@@ -2,7 +2,8 @@ import os
 import random
 import torch
 from torch.utils.data import DataLoader
-from datasets import *
+from ..datasets import *
+from ..datasets.coco import prepare_coco_detection
 
 COCO_DIR = "datasets/COCO"
 

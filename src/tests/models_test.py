@@ -1,8 +1,8 @@
 import os
 import torch
 
-from model import *
-from losses import render_target_heatmap_cornernet
+from ..models import *
+from ..losses.utils import render_target_heatmap_cornernet
 
 sample_cfg = "configs/coco_resnet34.yaml"
 

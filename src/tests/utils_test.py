@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from utils import *
+from ..utils import *
 
 box_convert_fn = [
     convert_xywh_to_x1y1x2y2,

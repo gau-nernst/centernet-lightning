@@ -1,5 +1,5 @@
 import torch
-from backbones import *
+from ..backbones import *
 
 _backbone_names = ["resnet18", "resnet34", "resnet50", "resnet101", "mobilenet_v2", "mobilenet_v3_large", "mobilenet_v3_small"]
 
