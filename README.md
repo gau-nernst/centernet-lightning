@@ -206,6 +206,8 @@ If you only need inference, only key `image` is needed.
 
 ## Notes
 
+### Implementation
+
 Unsupported features from original CenterNet:
 
 - Deformable convolution (DCN). There are implementations from Torchvision 0.8+, Detectron2, and MMCV.
@@ -214,9 +216,18 @@ Unsupported features from original CenterNet:
 Notable modifications:
 
 - Focal loss: use `torch.logsigmoid()` to improve numerical stability when calculating focal loss. [CenterNet-better-plus](https://github.com/lbin/CenterNet-better-plus) and [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet) clamp input tensor.
-- Gaussian kernel for target heatmp: there are 2 versions implemented: original CornerNet version (with bug fix) and TTFNet version.
+
+**Target heatmap** There are two versions implemented here, one from CornerNet, which original CenterNet uses, and one from TTFNet. Since CenterNet takes a lot of work from CornerNet, I believe this target heatmap is not quite appropriate, because CenterNet and CornerNet tries to predict different types of heatmap. Moreover, the CornerNet target heatmap produces very small Gaussian kernel, which further slow down convergence.
+
+### Dataset
 
 [Safety Helmet Wearing Dataset](https://github.com/njvisionpower/Safety-Helmet-Wearing-Dataset/)
 
 - Some image files have extension `.JPG` instead of `.jpg`. Rename all `.JPG` to `.jpg` to avoid issues
 - The Google Driver version of the dataset has the annotation `000377.xml` with label `dog`. As noted by the author [here](https://github.com/njvisionpower/Safety-Helmet-Wearing-Dataset/issues/18), it should be `hat` instead.
+
+### Training
+
+CenterNet convergence speed is very slow. The original paper trained the model for 140 epochs on COCO2017. I haven't been able to produce good results training on COCO.
+
+As noted by other people, this is mainly because for regression heads (size and offset), only points at ground truth boxes are used for training. TTFNet comes up with a novel way to tackle this, but it is not implemented here.
