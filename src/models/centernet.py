@@ -56,6 +56,7 @@ class CenterNet(pl.LightningModule):
             fill_bias=fill_bias["heatmap"]
         )
         self.head_loss_fn["heatmap"] = FocalLossWithLogits(alpha=2., beta=4.)       # focal loss for heatmap
+        assert "heatmap" in loss_weights
 
         for h in other_heads:
             assert h in _supported_heads
@@ -156,6 +157,11 @@ class CenterNet(pl.LightningModule):
         losses["size"] /= N
         losses["offset"] /= N
 
+        total_loss = torch.tensor(0., dtype=losses["heatmap"].dtype, device=self.device)
+        for k,v in losses.items():
+            total_loss += v * self.loss_weights[k]
+        losses["total"] = total_loss
+
         return losses
 
     def decode_detections(self, encoded_outputs: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3):
@@ -206,72 +212,61 @@ class CenterNet(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         encoded_output = self(batch)
         losses = self.compute_loss(encoded_output, batch)
-        
-        total_loss = losses["heatmap"]
-        for h in self.other_heads:
-            total_loss += losses[h] * self.loss_weights[h]
-
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
-        self.log("train/total_loss", total_loss)
+
         self.log("epoch_frac", self.global_step / self.steps_per_epoch)     # log this to view graph with epoch as x-axis
 
         self.log_histogram("output_values/heatmap", encoded_output["heatmap"])
         self.log_histogram("output_values/size", encoded_output["size"])
         self.log_histogram("output_values/offset", encoded_output["offset"])
 
-        return total_loss
+        return losses["total"]
 
     def validation_step(self, batch, batch_idx):
         encoded_output = self(batch)
         losses = self.compute_loss(encoded_output, batch)
-
-        total_loss = losses["heatmap"]
-        for h in self.other_heads:
-            total_loss += losses[h] * self.loss_weights[h]
-
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
-        self.log("val/total_loss", total_loss)
 
-        pred_detections = self.decode_detections(encoded_output, num_detections=100)
+        # pred_detections = self.decode_detections(encoded_output, num_detections=100)
 
-        class_tp = np.zeros((11, self.num_classes))
-        class_fp = np.zeros((11, self.num_classes))
+        # class_tp = np.zeros((11, self.num_classes))
+        # class_fp = np.zeros((11, self.num_classes))
 
-        for i in range(11):
-            # detection thresholds 0.0, 0.1, ..., 1.0
-            tp, fp = self.evaluate_batch(pred_detections, batch, detection_threshold=i/10)
-            class_tp[i] = tp
-            class_fp[i] = fp
+        # for i in range(11):
+        #     # detection thresholds 0.0, 0.1, ..., 1.0
+        #     tp, fp = self.evaluate_batch(pred_detections, batch, detection_threshold=i/10)
+        #     class_tp[i] = tp
+        #     class_fp[i] = fp
         
-        result = {
-            "tp": class_tp,
-            "fp": class_fp,
-        }
+        # result = {
+        #     "tp": class_tp,
+        #     "fp": class_fp,
+        # }
 
-        return result
+        # return result
 
-    def validation_epoch_end(self, outputs):
-        class_tp = np.zeros((11, self.num_classes), dtype=np.float32)
-        class_fp = np.zeros((11, self.num_classes), dtype=np.float32)
-        for batch in outputs:
-            class_tp += batch["tp"]
-            class_fp += batch["fp"]
+    # def validation_epoch_end(self, outputs):
+    #     class_tp = np.zeros((11, self.num_classes), dtype=np.float32)
+    #     class_fp = np.zeros((11, self.num_classes), dtype=np.float32)
+    #     for batch in outputs:
+    #         class_tp += batch["tp"]
+    #         class_fp += batch["fp"]
         
-        precision = class_tp / (class_tp + class_fp + 1e-8)
-        for i in range(1, precision.shape[0]):
-            np.maximum(precision[i],  precision[i-1], out=precision[i])
+    #     precision = class_tp / (class_tp + class_fp + 1e-8)
+    #     for i in range(1, precision.shape[0]):
+    #         np.maximum(precision[i],  precision[i-1], out=precision[i])
 
-        ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
-        mAP = np.average(ap)                    # average over classes to get mAP
+    #     ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
+    #     mAP = np.average(ap)                    # average over classes to get mAP
 
-        for i, class_ap in enumerate(ap):
-            self.log(f"AP50/class_{i:02d}", class_ap)
+    #     for i, class_ap in enumerate(ap):
+    #         self.log(f"AP50/class_{i:02d}", class_ap)
         
-        self.log("val/mAP50", mAP)
-        self.log("val/AP50_person", ap[0])
-        self.log("val/AP50_car", ap[2])
+    #     self.log("val/mAP50", mAP)
+    #     self.log("val/AP50_person", ap[0])
+    #     self.log("val/AP50_car", ap[2])
 
     @torch.no_grad()
     def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], detection_threshold: float = 0.5):
