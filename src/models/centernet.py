@@ -11,11 +11,10 @@ import wandb
 
 from ..backbones import build_backbone
 from ..losses import FocalLossWithLogits
-from ..losses.utils import render_target_heatmap_ttfnet, render_target_heatmap_cornernet
 from ..utils.metrics import class_tpfp_batch
 from ..utils import convert_cxcywh_to_x1y1x2y2
 
-__all__ = ["CenterNet", "build_centernet_from_cfg"]
+__all__ = ["CenterNet"]
 
 _supported_heads = ["size", "offset"]
 _output_head_channels = {
@@ -111,45 +110,46 @@ class CenterNet(pl.LightningModule):
         
         return output
 
-    def compute_loss(self, output_maps: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
         """Return a dictionary of losses for each output head. This method is called during the training step
         """
-        bboxes = targets["bboxes"]              # ND4
-        labels = targets["labels"]              # ND
-        mask   = targets["mask"].unsqueeze(-1)  # add column dimension to support broadcasting
+        bboxes = targets["bboxes"].clone()
+        target_heatmap = targets["heatmap"]
+        mask = targets["mask"].unsqueeze(-1)    # add column dimension to support broadcasting
 
-        heatmap = output_maps["heatmap"]
-        batch_size, _, out_h, out_w = heatmap.shape
+        batch_size, _, heatmap_h, heatmap_w = preds["heatmap"].shape
+        pred_heatmap = preds["heatmap"]
+        size_map     = preds["size"].view(batch_size, 2, -1)    # flatten last xy dimensions for torch.gather() later
+        offset_map   = preds["offset"].view(batch_size, 2, -1)
 
-        size_map = output_maps["size"].view(batch_size, 2, -1)      # flatten last xy dimensions
-        offset_map = output_maps["offset"].view(batch_size, 2, -1)  # for torch.gather() later
-
-        # initialize losses to 0
+        # initialize losses
         losses = {}
 
-        out_bboxes = bboxes / self.output_stride    # convert input image coordinates to output image coordinates
-        centers_int = out_bboxes[...,:2].long()     # convert to integer to use as index
+        # convert normalized coordinates [0,1] to heatmap pixel coordinates [0,128]
+        bboxes[...,[0,2]] *= heatmap_w
+        bboxes[...,[1,3]] *= heatmap_h
+        centers_int = bboxes[...,:2].long()     # convert to integer to use as index
 
         # combine xy indices for torch.gather()
         # repeat indices using .expand() to gather on 2 channels
-        xy_indices = centers_int[...,1] * out_w + centers_int[...,0]        # y * w + x
+        xy_indices = centers_int[...,1] * heatmap_w + centers_int[...,0]        # y * w + x
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
 
         pred_sizes  = torch.gather(size_map, dim=-1, index=xy_indices)      # N2D
         pred_offset = torch.gather(offset_map, dim=-1, index=xy_indices)    # N2D
 
         # need to swapaxes since pred_size is N2D but true_wh is ND2
-        size_loss = self.head_loss_fn["size"](pred_sizes.swapaxes(1,2), out_bboxes[...,2:])
+        target_size = bboxes[...,2:] * self.output_stride           # convert to original image pixel coordinate
+        size_loss = self.head_loss_fn["size"](pred_sizes.swapaxes(1,2), target_size)
         size_loss = torch.sum(size_loss * mask)
         losses["size"] = size_loss
 
-        target_offset = out_bboxes[...,:2] - torch.floor(out_bboxes[...,:2])
+        target_offset = bboxes[...,:2] - torch.floor(bboxes[...,:2])    # quantization error
         offset_loss = self.head_loss_fn["offset"](pred_offset.swapaxes(1,2), target_offset)
         offset_loss = torch.sum(offset_loss * mask)
         losses["offset"] = offset_loss
 
-        target_heatmap = render_target_heatmap_cornernet(heatmap.shape, out_bboxes, labels, mask, device=self.device, dtype=heatmap.dtype)
-        losses["heatmap"] = self.head_loss_fn["heatmap"](heatmap, target_heatmap)
+        losses["heatmap"] = self.head_loss_fn["heatmap"](pred_heatmap, target_heatmap)
 
         # average over number of detections
         N = torch.sum(mask) + eps
@@ -158,21 +158,21 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, encoded_output: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3):
+    def decode_detections(self, encoded_outputs: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3):
         """Decode model output to detections
         """
         # reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
-        batch_size, _, out_h, out_w = encoded_output["heatmap"].shape
-        heatmap    = encoded_output["heatmap"]
-        size_map   = encoded_output["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
-        offset_map = encoded_output["offset"].view(batch_size, 2, -1)
+        batch_size, _, out_h, out_w = encoded_outputs["heatmap"].shape
+        heatmap    = encoded_outputs["heatmap"]
+        size_map   = encoded_outputs["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
+        offset_map = encoded_outputs["offset"].view(batch_size, 2, -1)
 
         # obtain topk from heatmap
         # NOTE: must apply sigmoid before max pool
-        heatmap = torch.sigmoid(encoded_output["heatmap"])
+        heatmap = torch.sigmoid(heatmap)
         local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
         nms_mask = (heatmap == local_peaks)  # pseudo-nms, only consider local peaks
         heatmap = nms_mask.float() * heatmap
@@ -196,8 +196,8 @@ class CenterNet(pl.LightningModule):
 
         topk_bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
-            "labels": topk_classes,
             "bboxes": topk_bboxes,
+            "labels": topk_classes,
             "scores": topk_scores
         }
         return out

@@ -1,5 +1,5 @@
+from src.datasets.utils import render_target_heatmap_cornernet, render_target_heatmap_ttfnet
 from typing import Tuple, Iterable
-import pickle
 
 import numpy as np
 import cv2
@@ -7,10 +7,10 @@ import torch
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from torch.utils.data import Subset
 import wandb
 
 from ..datasets import IMAGENET_MEAN, IMAGENET_STD, COCODataset
-from ..datasets.coco import get_coco_subset
 from .box import *
 
 RED = (1., 0., 0.)
@@ -93,13 +93,41 @@ class LogImageCallback(pl.Callback):
     imagenet_std  = np.array(IMAGENET_STD, dtype=np.float32)
     cmap = "viridis"
 
-    def __init__(self, data_dir: str, detection_file: str, indices = None):
-        sub_detections = get_coco_subset(detection_file, indices)
-        with open("temp.pkl", "wb") as f:
-            pickle.dump(sub_detections, f)
+    def __init__(self, data_dir: str, split: str, indices = None):
+        if indices is None:
+            indices = range(16)
+        elif isinstance(indices, int):
+            indices = range(indices)
         
-        self.dataset = COCODataset(data_dir, "temp.pkl")
+        dataset = COCODataset(data_dir, split)
+        dataset = Subset(dataset, indices)
+        self.dataset = dataset
 
+    # log target heatmap on fit start
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        # get heatmap shape and allocate memory
+        img_shape = self.dataset[0]["image"].shape
+        heatmap_shape = (pl_module.num_classes, img_shape[1]//pl_module.output_stride, img_shape[2]//pl_module.output_stride)
+        heatmaps = [np.zeros(heatmap_shape) for _ in range(len(self.dataset))]
+
+        # render target heatmap
+        for i, item in enumerate(self.dataset):
+            if pl_module.hparams["heatmap_method"] == "cornernet":
+                render_target_heatmap_cornernet(heatmaps[i], item["bboxes"], item["labels"])
+            elif pl_module.hparams["heatmap_method"] == "ttfnet":
+                render_target_heatmap_ttfnet(heatmaps[i], item["bboxes"], item["labels"])
+
+            heatmaps[i] = np.max(heatmaps[i], axis=0)
+            heatmaps[i] = apply_mpl_cmap(heatmaps[i], self.cmap)
+
+        # make into a grid and log the image
+        heatmap_grid = make_image_grid(heatmaps)
+        if isinstance(trainer.logger, WandbLogger):
+            trainer.logger.experiment.log({"target heatmap": wandb.Image(heatmap_grid)})
+        elif isinstance(trainer.logger, TensorBoardLogger):
+            trainer.logger.experiment.add_image("target heatmap", heatmap_grid, dataformats="hwc")
+
+    # run inference and log predicted detections
     @torch.no_grad()
     def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
         log_images = {
@@ -117,6 +145,7 @@ class LogImageCallback(pl.Callback):
             "labels": [],
             "scores": []
         }
+        _, img_height, img_width = self.dataset[0]["image"].shape
 
         pl_module.eval()
         for item in self.dataset:
@@ -124,9 +153,13 @@ class LogImageCallback(pl.Callback):
             img = item["image"]
             img_np = img.clone().numpy().transpose(1,2,0) * self.imagenet_std + self.imagenet_mean
             images.append(img_np)
+            
             # save ground truth bboxes and labels
             for k in detections_target.keys():
                 detections_target[k].append(np.array(item[k]))
+            
+            detections_target["bboxes"][-1][...,[0,2]] *= img_width
+            detections_target["bboxes"][-1][...,[1,3]] *= img_height
             convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1])
 
             # only key "image" is need to run inference
@@ -167,7 +200,7 @@ class LogImageCallback(pl.Callback):
             wandb_log = {
                 "detections": wandb.Image(img_grid, boxes={
                     "predictions": {"box_data": convert_bboxes_to_wandb(pred_bboxes, pred_labels, pred_scores)},
-                    "ground_truth": {"box_data": convert_bboxes_to_wandb(target_bboxes, target_labels)}
+                    "ground_truth": {"box_data": convert_bboxes_to_wandb(target_bboxes, target_labels, np.ones(len(target_labels)))}
                 }),
                 "global_step": trainer.global_step
             }
@@ -189,7 +222,7 @@ def make_image_grid(imgs: Iterable[np.ndarray], bboxes1: Iterable[np.ndarray] = 
     """
     Args
         imgs: a list of images in HWC format
-        bboxes1 and bboxes2 (optional): a list of bboxes, each in xywh, cxcywh, or x1y1x2y2 format. intended for ground truth boxes and predicted boxes
+        bboxes1 and bboxes2 (optional): a list of bboxes. intended for ground truth boxes and predicted boxes
     """
     num_imgs = len(imgs)
     img_height, img_width, channels = imgs[0].shape

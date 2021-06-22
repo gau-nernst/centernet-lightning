@@ -9,6 +9,8 @@ model:
       init_bilinear: True               # only used with conv_transpose
   
   num_classes: 80
+  heatmap_method: cornernet       # cornernet or ttfnet
+
   output_heads:
     other_heads: [size, offset]
     fill_bias: 
@@ -36,14 +38,17 @@ model:
 
 data:
   train:
-    data_dir: datasets/COCO/train2017
-    annotation_file: datasets/COCO/annotations/instances_train2017.json
-    coco: True
+    type: coco
+    dataset_params:
+      data_dir: datasets/COCO/
+      split: train2017
+    
     dataloader_params:
       batch_size: 32
       num_workers: 8
       shuffle: True
       pin_memory: True
+    
     transforms:
       # augmentations used in CenterNet paper
       # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
@@ -62,14 +67,17 @@ data:
           saturation: 0.4
 
   validation:
-    data_dir: datasets/COCO/val2017
-    annotation_file: datasets/COCO/annotations/instances_val2017.json
-    coco: True
+    type: coco
+    dataset_params:
+      data_dir: datasets/COCO/
+      split: val2017
+    
     dataloader_params:
       batch_size: 32
       num_workers: 8
       shuffle: False
       pin_memory: True
+    
     transforms:
       - name: Resize
         params:
@@ -81,7 +89,7 @@ trainer:
     gpus: 1
     precision: 16
     max_epochs: 10
-    limit_val_batches: 20
+    # limit_val_batches: 20
     val_check_interval: 0.5
     benchmark: True
     gradient_clip_val: 35     # mmdetection
@@ -89,5 +97,5 @@ trainer:
   logger:
     name: wandb         # tensorboard or wandb
     params:
-      project: test
+      project: centernet
       log_model: True
