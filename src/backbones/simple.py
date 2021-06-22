@@ -16,7 +16,7 @@ class ConvUpsampleBlock(nn.Module):
         out_channels: int,
         upsample_type: str = "conv_transpose",
         conv_type: str = "normal",
-        deconv_params: Dict = None,
+        deconv_kernel: int = 4,
         init_bilinear: bool = True,
         **kwargs
     ):
@@ -24,9 +24,6 @@ class ConvUpsampleBlock(nn.Module):
         if conv_type not in ["dcn", "separable", "normal"]:
             warnings.warn(f"{conv_type} is not supported. Fall back to normal convolution")
             conv_type = "normal"
-        
-        if deconv_params is None:
-            deconv_params = dict(kernel_size=4, stride=2, padding=1, output_padding=0, bias=False)
 
         if conv_type == "dcn":
             # potential dcn implementations
@@ -53,14 +50,22 @@ class ConvUpsampleBlock(nn.Module):
             conv_type = "conv_transpose"
 
         if upsample_type == "conv_transpose":
-            upsample = nn.ConvTranspose2d(out_channels, out_channels, **deconv_params)
+            output_padding = deconv_kernel % 2
+            padding = (deconv_kernel + output_padding) // 2 - 1
+
+            upsample = nn.ConvTranspose2d(
+                out_channels, out_channels,
+                kernel_size=deconv_kernel, stride=2,
+                padding=padding, output_padding=output_padding,
+                bias=False
+            )
+
+            # TF CenterNet does not do this
+            if init_bilinear:
+                self.init_bilinear_upsampling(upsample)
+        
         else:
             upsample = nn.Upsample(scale_factor=2, mode=upsample_type)
-
-        # default behavior, initialize weights to bilinear upsampling
-        # TF CenterNet does not do this
-        if upsample_type == "conv_transpose" and init_bilinear:
-            self.init_bilinear_upsampling(upsample)
 
         self.upsample = nn.Sequential(
             upsample,
@@ -109,7 +114,8 @@ class SimpleBackbone(nn.Module):
 
         # fill default values
         if conv_upsample_block is None:
-            conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_params=None, init_bilinear=True)
+            warnings.warn("conv_upsample_block is not specified. default to upsample_type=conv_transpose and conv_type=normal")
+            conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_kernel=4, init_bilinear=True)
 
         # build upsample stage
         conv_upsample_layers = []

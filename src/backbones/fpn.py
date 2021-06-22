@@ -1,3 +1,4 @@
+import warnings
 from typing import Dict, Iterable
 
 import torch
@@ -29,10 +30,12 @@ class FPNBackbone(nn.Module):
 
         # fill default values
         if skip_connection is None:
+            warnings.warn("skip_connection is not specified. default to kernel_size=1")
             skip_connection = dict(kernel_size=1)
         
         if conv_upsample_block is None:
-            conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_params=None, init_bilinear=True)
+            warnings.warn("conv_upsample_block is not specified. default to upsample_type=conv_transpose and conv_type=normal")
+            conv_upsample_block = dict(upsample_type="conv_transpose", conv_type="normal", deconv_kernel=4, init_bilinear=True)
 
         # build skip connections
         for i in range(len(upsample_channels)):
