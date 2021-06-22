@@ -10,7 +10,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import Subset
 import wandb
 
-from ..datasets import IMAGENET_MEAN, IMAGENET_STD, COCODataset
+from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset
 from .box import *
 
 RED = (1., 0., 0.)
@@ -93,13 +93,13 @@ class LogImageCallback(pl.Callback):
     imagenet_std  = np.array(IMAGENET_STD, dtype=np.float32)
     cmap = "viridis"
 
-    def __init__(self, data_dir: str, split: str, indices = None):
+    def __init__(self, dataset_cfg, indices = None):
         if indices is None:
             indices = range(16)
         elif isinstance(indices, int):
             indices = range(indices)
         
-        dataset = COCODataset(data_dir, split)
+        dataset = build_dataset(**dataset_cfg)
         dataset = Subset(dataset, indices)
         self.dataset = dataset
 
