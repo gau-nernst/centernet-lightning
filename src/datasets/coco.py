@@ -1,5 +1,4 @@
 import warnings
-from typing import Dict, Iterable
 import os
 from collections import OrderedDict
 import json
@@ -39,23 +38,36 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
     img_ids = coco.getImgIds()                          # list of all image ids
     img_info = coco.loadImgs(img_ids)                   # list of img info, each is a dict
     img_names = [x["file_name"] for x in img_info]      # we only need file_name to open the images
+    img_dim = [(x["width"], x["height"]) for x in img_info]     # to normalize bboxes (yolo format)
 
     annotate_ids = [coco.getAnnIds(imgIds=x) for x in img_ids]      # get annotations for each image
     annotates = [coco.loadAnns(ids=x) for x in annotate_ids]        
 
     bboxes = []
     labels = []
-    for ann in annotates:       # outer loop is loop over images
+    for ann, (img_width, img_height) in zip(annotates, img_dim):       # outer loop is loop over images
         img_bboxes = []
         img_labels = []
         for detection in ann:   # inner loop is loop over detections in an image
-            bbox = detection["bbox"]
+            box = detection["bbox"]
             cat_id = detection["category_id"]
 
-            bbox[2] = max(bbox[2], 1)   # clip width and height to 1
-            bbox[3] = max(bbox[3], 1)
-        
-            img_bboxes.append(bbox)
+            # clip width and height
+            # convert xywh to cxcywh
+            box[2] = max(box[2], 1)  
+            box[3] = max(box[3], 1)
+            box[2] = min(box[2], img_width-box[0]-1)
+            box[3] = min(box[3], img_height-box[1]-1)
+            box[0] += box[2] / 2 
+            box[1] += box[3] / 2
+
+            # normalize coordinates to [0,1]
+            box[0] /= img_width
+            box[1] /= img_height
+            box[2] /= img_width
+            box[3] /= img_height
+
+            img_bboxes.append(box)
             img_labels.append(id_to_label[cat_id])
 
         bboxes.append(img_bboxes)
@@ -72,28 +84,8 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
 
     del coco
 
-def get_coco_subset(detection_file: str, indices: Iterable = None):
-    if not indices:
-        indices = range(16)
-    elif isinstance(indices, int):
-        indices = range(indices)
-     
-    with open(detection_file, "rb") as f:
-        detection = pickle.load(f)
-    
-    sub_detection = {
-        "img_names": [],
-        "bboxes": [],
-        "labels": []
-    }
-    for i in indices:
-        for k in sub_detection.keys():
-            sub_detection[k].append(detection[k][i])
-    
-    return sub_detection
-
 class COCODataset(Dataset):
-    """Dataset class for dataset in COCO format
+    """Dataset class for dataset in COCO format. Only detection is supported. Bounding box in YOLO format (cxcywh and normalized to [0,1])
 
     Args:
         data_dir: root directory, which contains folder `annotations` and `images`
@@ -102,8 +94,10 @@ class COCODataset(Dataset):
     """
     def __init__(self, data_dir: str, split: str, transforms: A.Compose = None):
         super(COCODataset, self).__init__()
-        ann_dir = os.path.join(data_dir, "annotataions")
-        detection_file = os.path.join(ann_dir, "detections.pkl")
+        # e.g. COCO/annotations
+        ann_dir = os.path.join(data_dir, "annotations")
+        # e.g. COCO/annotations/detections_val2017.pkl
+        detection_file = os.path.join(ann_dir, f"detections_{split}.pkl")
 
         # extract necessary info for detection
         if not os.path.exists(detection_file):
@@ -114,18 +108,20 @@ class COCODataset(Dataset):
 
         if transforms is None:
             warnings.warn("transforms is not specified. Default to normalize with ImageNet and resize to 512x512")
-            transforms = get_default_transforms(format="coco")
+            transforms = get_default_transforms()
 
-        self.img_dir = data_dir
+        # e.g. COCO/images/val2017
+        self.img_dir = os.path.join(data_dir, "images", split)
         self.transforms = transforms
 
         self.img_names = detection["img_names"]
-        self.bboxes    = detection["bboxes"]
-        self.labels    = detection["labels"]
+        self.bboxes = detection["bboxes"]
+        self.labels = detection["labels"]
 
     def __getitem__(self, index: int):
-        img_path = os.path.join(self.img_dir, self.img_names[index])
-        img = cv2.imread(img_path)
+        img_name = self.img_names[index]
+        img_name = os.path.join(self.img_dir, img_name)
+        img = cv2.imread(img_name)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         bboxes = self.bboxes[index]
@@ -137,13 +133,6 @@ class COCODataset(Dataset):
         img = augmented["image"]
         bboxes = augmented["bboxes"]
         labels = augmented["labels"]
-
-        # convert xywh to cxcywh
-        for i, box in enumerate(bboxes):
-            x, y, w, h = box
-            cx = x + w / 2
-            cy = y + h / 2
-            bboxes[i] = [cx, cy, w, h]
 
         item = {
             "image": img,

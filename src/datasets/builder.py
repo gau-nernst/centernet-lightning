@@ -1,31 +1,40 @@
 from torch.utils.data import DataLoader
+import pytorch_lightning as pl
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from .coco import COCODataset
 from .voc import VOCDataset
-from .utils import IMAGENET_MEAN, IMAGENET_STD, collate_detections_with_padding
+from .utils import CollateDetectionsCenterNet, IMAGENET_MEAN, IMAGENET_STD
+
+__all__ = ["build_dataset", "build_dataloader"]
 
 _dataset_mapper = {
     "coco": COCODataset,
     "voc": VOCDataset
 }
 
-_format_mapper = {
-    "coco": "coco",
-    "voc": "pascal_voc"
-}
-
-def build_dataloader(type, dataset_params, dataloader_params, transforms):
+def build_dataset(type, dataset_params, transforms = None, **kwargs):
     assert type in _dataset_mapper
 
-    transforms = parse_transforms(transforms, format=_format_mapper[type])
+    if transforms is not None:
+        transforms = parse_transforms(transforms)
     dataset = _dataset_mapper[type](transforms=transforms, **dataset_params)
-    dataloader = DataLoader(dataset, collate_fn=collate_detections_with_padding, **dataloader_params)
+    return dataset
 
+def build_dataloader(model, type, dataset_params, dataloader_params, transforms = None, **kwargs):
+    """A CenterNet model is required to build the dataloader, since it needs to know the params to create target heatmap
+    """
+    dataset = build_dataset(type, dataset_params, transforms=transforms)
+    
+    img_shape = dataset[0]["image"].shape
+    heatmap_shape = (model.num_classes, img_shape[1]//model.output_stride, img_shape[2]//model.output_stride)
+
+    collate_fn = CollateDetectionsCenterNet(heatmap_shape, heatmap_method=model.hparams["heatmap_method"])
+    dataloader = DataLoader(dataset, collate_fn=collate_fn, **dataloader_params)
     return dataloader
 
-def parse_transforms(transforms_cfg, format="coco"):
+def parse_transforms(transforms_cfg, format="yolo"):
     transforms = []
     for x in transforms_cfg:
         transf = A.__dict__[x["name"]](**x["params"])
