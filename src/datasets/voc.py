@@ -9,12 +9,12 @@ import albumentations as A
 
 from .utils import get_default_transforms
 
-def process_voc_xml(ann_file):
+def process_voc_xml(ann_file, original_bboxes=False):
     tree = ET.parse(ann_file)
     root = tree.getroot()
 
     names = []
-    boxes = []
+    bboxes = []
 
     img_width = int(root.find("size/width").text)
     img_height = int(root.find("size/height").text)
@@ -29,16 +29,26 @@ def process_voc_xml(ann_file):
         x2 = min(float(x.find("bndbox/xmax").text), img_width-1)
         y2 = min(float(x.find("bndbox/ymax").text), img_height-1)
 
-        # x1x2y1y2 to cxcywh and normalize to [0,1] (yolo format)
-        # clamp w and h to 1
-        cx = (x1 + x2) / (2 * img_width)
-        cy = (y1 + y2) / (2 * img_height)
-        w  = (x2 - x1) / img_width
-        h  = (y2 - y1) / img_height
+        if original_bboxes:
+            bboxes.append([x1, y1, x2, y2])
+        
+        else:
+            # x1x2y1y2 to cxcywh and normalize to [0,1] (yolo format)
+            # clamp w and h to 1
+            cx = (x1 + x2) / (2 * img_width)
+            cy = (y1 + y2) / (2 * img_height)
+            w  = (x2 - x1) / img_width
+            h  = (y2 - y1) / img_height
 
-        boxes.append([cx, cy, w, h])
+            bboxes.append([cx, cy, w, h])
 
-    return names, boxes
+    item = {
+        "img_width": img_width,
+        "img_height": img_height,
+        "names": names,
+        "bboxes": bboxes
+    }
+    return item
 
 class VOCDataset(Dataset):
     """Dataset class for data in PASCAL VOC format. Only detection is supported. Bounding box in YOLO format (cxcywh and normalized to [0,1])
@@ -71,7 +81,9 @@ class VOCDataset(Dataset):
         for img_name in img_names:
             ann_file = os.path.join(ann_dir, f"{img_name}.xml")
 
-            names, boxes = process_voc_xml(ann_file)
+            annotation = process_voc_xml(ann_file)
+            names = annotation["names"]
+            boxes = annotation["bboxes"]
             if name_to_label:
                 names = [name_to_label[x] for x in names]
 
