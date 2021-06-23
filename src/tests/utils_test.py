@@ -57,7 +57,7 @@ def test_draw_bboxes():
     draw_bboxes(img, bboxes, labels)
     draw_bboxes(img, bboxes, labels, scores)
     draw_bboxes(img, bboxes, labels, scores, score_threshold=0.5)
-    draw_bboxes(img, bboxes, labels, relative_scale=True)
+    draw_bboxes(img, bboxes, labels, normalized_bbox=True)
     draw_bboxes(img, bboxes, labels, color=(0,1,1))
     draw_bboxes(img, bboxes, labels, text_color=(1,1,1))
 

@@ -1,4 +1,4 @@
-from src.datasets.utils import render_target_heatmap_cornernet, render_target_heatmap_ttfnet
+import warnings
 from typing import Tuple, Iterable
 
 import numpy as np
@@ -10,7 +10,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import Subset
 import wandb
 
-from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset
+from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset, render_target_heatmap_cornernet, render_target_heatmap_ttfnet
 from .box import *
 
 RED = (1., 0., 0.)
@@ -21,9 +21,9 @@ def draw_bboxes(
     bboxes: np.ndarray,
     labels: np.ndarray,
     scores: np.ndarray = None,
-    score_threshold: float = None,
+    score_threshold: float = 0,
     inplace: bool = True,
-    relative_scale: bool = False,
+    normalized_bbox: bool = False,
     color: Tuple[int] = (255,0,0),
     text_color: Tuple[int] = (0,0,0),
     font: int = cv2.FONT_HERSHEY_PLAIN
@@ -31,20 +31,31 @@ def draw_bboxes(
     """Draw bounding boxes on an image using `cv2`
     
     Args:
-        `img`: RGB image in HWC format, either in [0,255] or [0,1]
+        `img`: an RGB image in HWC format, either in [0,255] or [0,1]
         `bboxes`: x1y1x2y2 format
+        `labels`: class labels for each bbox
+        `scores` (optional): confidence score to display with the label
+        `score_threshold`: threshold to filter bboxes. Default is 0
+        `inplace`: whether to draw bboxes directly on the original image or make a copy. Default is True
+        `normalized_bbox`: whether the input bboxes are in normalized coordinates [0,1]. Default is False
+        `color`: color used for bbox
+        `text_color` and `font`: for text (label and score)
     """
-    if not inplace:
+    if not img.flags.c_contiguous:
+        if inplace:
+            warnings.warn("input image is not C-contiguous. this operation will not be inplace")
+        img = np.ascontiguousarray(img)     # this will return a copy so inplace is ignored
+    elif not inplace:
         img = img.copy()
 
-    if relative_scale:
+    if normalized_bbox:
         bboxes = bboxes.copy()
         bboxes[:,[0,2]] *= img.shape[1]
         bboxes[:,[1,3]] *= img.shape[0]
     bboxes = bboxes.astype(int)
 
     for i in range(bboxes.shape[0]):
-        if score_threshold and scores[i] < score_threshold:
+        if scores is not None and scores[i] < score_threshold:
             continue
         
         pt1 = bboxes[i,:2]
