@@ -1,6 +1,5 @@
 from .box import *
 from .image_annotate import *
-from .metrics import *
 
 __all__ = [
     "convert_xywh_to_cxcywh", "convert_cxcywh_to_xywh",
