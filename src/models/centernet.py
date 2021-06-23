@@ -98,7 +98,7 @@ class CenterNet(pl.LightningModule):
         return output_head
 
     def forward(self, batch):
-        """Return a dictionary of feature maps for each output head. Use this output to either decode to predictions or compute loss.
+        """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections.
         """
         img = batch["image"]
 
@@ -112,7 +112,7 @@ class CenterNet(pl.LightningModule):
         return output
 
     def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
-        """Return a dictionary of losses for each output head. This method is called during the training step
+        """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
         bboxes = targets["bboxes"].clone()
         target_heatmap = targets["heatmap"]
@@ -164,8 +164,14 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, encoded_outputs: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3):
+    def decode_detections(self, encoded_outputs: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3, normalize_bbox: bool = False):
         """Decode model output to detections
+
+        Args
+            encoded_outputs: outputs after calling forward pass `model(batch)`
+            num_detections: number of detections to return. Default is 100
+            nms_kernel: the kernel used for max pooling (pseudo-nms). Larger values will reduce false positives. Default is 3 (original paper)
+            normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
         """
         # reference implementations
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
@@ -176,110 +182,76 @@ class CenterNet(pl.LightningModule):
         size_map   = encoded_outputs["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
         offset_map = encoded_outputs["offset"].view(batch_size, 2, -1)
 
-        # obtain topk from heatmap
+        # pseudo-nms via max pool
         # NOTE: must apply sigmoid before max pool
         heatmap = torch.sigmoid(heatmap)
         local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
-        nms_mask = (heatmap == local_peaks)  # pseudo-nms, only consider local peaks
+        nms_mask = (heatmap == local_peaks)
         heatmap = nms_mask.float() * heatmap
 
-        # flatten to N(CHW) to apply topk
-        heatmap = heatmap.view(batch_size, -1)
+        # because there is only 1 size regression for each location,
+        # there can't be multiple objects at the same heatmap location
+        # thus we only consider the best candidate at each heatmap location
+        heatmap, labels = torch.max(heatmap, dim=1)     # NHW
+
+        # flatten to run topk
+        heatmap = heatmap.view(batch_size, -1)          # N(HW)
+        labels = labels.view(batch_size, -1)
         topk_scores, topk_indices = torch.topk(heatmap, num_detections)
         
-        # restore flattened indices to class, xy indices
-        topk_classes    = topk_indices // (out_h*out_w)
-        topk_xy_indices = topk_indices % (out_h*out_w)
-        topk_y_indices  = topk_xy_indices // out_w
-        topk_x_indices  = topk_xy_indices % out_w
+        topk_labels = torch.gather(labels, dim=-1, index=topk_indices)
 
-        # extract bboxes at topk xy positions
-        # they are in input image coordinates (512x512)
-        topk_x = (topk_x_indices + torch.gather(offset_map[:,0], dim=-1, index=topk_xy_indices)) * self.output_stride
-        topk_y = (topk_y_indices + torch.gather(offset_map[:,1], dim=-1, index=topk_xy_indices)) * self.output_stride
-        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_xy_indices)
-        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_xy_indices)
+        # extract bboxes at topk positions
+        # x, y are in output heatmap coordinates (128x128)
+        # w, h are in input image coordinates (512x512)
+        topk_x = topk_indices % out_w + torch.gather(offset_map[:,0], dim=-1, index=topk_indices)
+        topk_y = topk_indices // out_w + torch.gather(offset_map[:,1], dim=-1, index=topk_indices)
+        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_indices)
+        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_indices)
+
+        if normalize_bbox:
+            # normalize to [0,1]
+            topk_x /= out_w
+            topk_y /= out_h
+            topk_w /= (out_w * self.output_stride)
+            topk_h /= (out_h * self.output_stride)
+        else:
+            # convert x, y to input image coordinates (512,512)
+            topk_x *= self.output_stride
+            topk_y *= self.output_stride
 
         topk_bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
             "bboxes": topk_bboxes,
-            "labels": topk_classes,
+            "labels": topk_labels,
             "scores": topk_scores
         }
         return out
 
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
-        encoded_output = self(batch)
-        losses = self.compute_loss(encoded_output, batch)
+        encoded_outputs = self(batch)
+        losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
 
         self.log("epoch_frac", self.global_step / self.steps_per_epoch)     # log this to view graph with epoch as x-axis
 
-        self.log_histogram("output_values/heatmap", encoded_output["heatmap"])
-        self.log_histogram("output_values/size", encoded_output["size"])
-        self.log_histogram("output_values/offset", encoded_output["offset"])
+        self.log_histogram("output_values/heatmap", encoded_outputs["heatmap"])
+        self.log_histogram("output_values/size", encoded_outputs["size"])
+        self.log_histogram("output_values/offset", encoded_outputs["offset"])
 
         return losses["total"]
 
     def validation_step(self, batch, batch_idx):
-        encoded_output = self(batch)
-        losses = self.compute_loss(encoded_output, batch)
+        encoded_outputs = self(batch)
+        losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
 
-        # pred_detections = self.decode_detections(encoded_output, num_detections=100)
-
-        # class_tp = np.zeros((11, self.num_classes))
-        # class_fp = np.zeros((11, self.num_classes))
-
-        # for i in range(11):
-        #     # detection thresholds 0.0, 0.1, ..., 1.0
-        #     tp, fp = self.evaluate_batch(pred_detections, batch, detection_threshold=i/10)
-        #     class_tp[i] = tp
-        #     class_fp[i] = fp
-        
-        # result = {
-        #     "tp": class_tp,
-        #     "fp": class_fp,
-        # }
-
-        # return result
-
-    # def validation_epoch_end(self, outputs):
-    #     class_tp = np.zeros((11, self.num_classes), dtype=np.float32)
-    #     class_fp = np.zeros((11, self.num_classes), dtype=np.float32)
-    #     for batch in outputs:
-    #         class_tp += batch["tp"]
-    #         class_fp += batch["fp"]
-        
-    #     precision = class_tp / (class_tp + class_fp + 1e-8)
-    #     for i in range(1, precision.shape[0]):
-    #         np.maximum(precision[i],  precision[i-1], out=precision[i])
-
-    #     ap = np.average(precision, axis=0)      # average over detection thresholds to get AP
-    #     mAP = np.average(ap)                    # average over classes to get mAP
-
-    #     for i, class_ap in enumerate(ap):
-    #         self.log(f"AP50/class_{i:02d}", class_ap)
-        
-    #     self.log("val/mAP50", mAP)
-    #     self.log("val/AP50_person", ap[0])
-    #     self.log("val/AP50_car", ap[2])
-
-    @torch.no_grad()
-    def evaluate_batch(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], detection_threshold: float = 0.5):
-        # move to cpu and convert to numpy
-        preds = {k: v.cpu().float().numpy() for k,v in preds.items()}
-        targets = {k: v.cpu().float().numpy() for k,v in targets.items()}
-
-        # convert cxcywh to x1y1x2y2
-        convert_cxcywh_to_x1y1x2y2(preds["bboxes"])
-        convert_cxcywh_to_x1y1x2y2(targets["bboxes"])
-
-        class_tp, class_fp = class_tpfp_batch(preds, targets, self.num_classes, detection_threshold=detection_threshold)
-        return class_tp, class_fp
+    def test_step(self, batch, batch_idx):
+        encoded_outputs = self(batch)
+        detections = self.decode_detections(encoded_outputs)
 
     @property
     def steps_per_epoch(self):
