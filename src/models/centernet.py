@@ -5,14 +5,16 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
 from ..backbones import build_backbone
 from ..losses import FocalLossWithLogits
-from ..utils.metrics import class_tpfp_batch
-from ..utils import convert_cxcywh_to_x1y1x2y2
+from ..datasets import InferenceDataset
+from ..utils import convert_cxcywh_to_xywh
+from ..eval import detections_to_coco_results
 
 __all__ = ["CenterNet"]
 
@@ -252,6 +254,45 @@ class CenterNet(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         encoded_outputs = self(batch)
         detections = self.decode_detections(encoded_outputs)
+
+    @torch.no_grad()
+    def inference(self, data_dir, img_names, batch_size=4, num_detections=100, nms_kernel=3, save_path=None, score_threshold=0):
+        dataset = InferenceDataset(data_dir, img_names)
+        dataloader = DataLoader(dataset, batch_size=batch_size)
+
+        all_detections = {
+            "bboxes": [],
+            "labels": [],
+            "scores": []
+        }
+
+        self.eval()
+        for batch in dataloader:
+            img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
+            img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
+            
+            batch = {"image": batch["image"].to(self.device)}
+
+            encoded_outputs = self(batch)
+            detections = self.decode_detections(encoded_outputs, num_detections=num_detections, nms_kernel=nms_kernel, normalize_bbox=True)
+            detections = {k: v.cpu().float().numpy() for k,v in detections.items()}
+
+            detections["bboxes"][...,[0,2]] *= img_widths
+            detections["bboxes"][...,[1,3]] *= img_heights
+
+            for k, v in detections.items():
+                all_detections[k].append(v)
+
+        all_detections = {k: np.concatenate(v, axis=0) for k,v in all_detections.items()}
+        
+        if save_path is not None:
+            bboxes = convert_cxcywh_to_xywh(detections["bboxes"]).tolist()
+            labels = detections["labels"].tolist()
+            scores = detections["scores"].tolist()
+
+            detections_to_coco_results(range(len(img_names)), bboxes, labels, scores, save_path, score_threshold=score_threshold)
+
+        return all_detections
 
     @property
     def steps_per_epoch(self):
