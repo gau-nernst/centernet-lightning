@@ -76,42 +76,65 @@ model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 
 ### Inference
 
-To run inference on an image: WIP
-
-If you want to run inference on a folder of images, use the `InferenceDataset`. It will perform the pre-processing for you (resize to 512x512, normalize with ImageNet statistics).
+To run inference on a folder of images, you can directly use `CenterNet.inference()`
 
 ```python
-import torch
-from torch.utils.data import DataLoader
-from src.datasets import InferenceDataset
-
 model = ...     # create a model as above
 model.eval()    # put model in evaluation mode
 
-# create dataset
-# img_names is optional. if not provided, the dataset will use all JPEG images in the folder
-dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"])
-dataloader = DataLoader(dataset)
+img_dir = "path/to/img/dir"
+img_names = ["001.jpg", "002.jpg"]
+
+# if you want to run inference on all images in the folder
+# import os
+# img_names = [x for x in os.listdir(img_dir) if x.endswith(".jpg")]
 
 # use CUDA if available
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = model.to(device)
 
-with torch.no_grad():           # turn of gradient
-    for batch in dataloader:
-        batch = {k: v.to(device) for k,v in batch.items()}  # transfer to GPU if available
-
-        encoded_outputs = model(batch)
-        detections = model.decode_detections(encoded_outputs, num_detections=10)
+detections = model.inference(img_dir, img_names, num_detections=100)
 
 # detections = {
-#   "bboxes": bounding boxes in cxcywh format, shape (batch x num_detections x 4)
-#   "labels": class labels, shape (batch x num_detections)
-#   "scores": confidence scores, shape (batch x num_detections)
+#   "bboxes": bounding boxes in cxcywh format, shape (num_images x num_detections x 4)
+#   "labels": class labels, shape (num_images x num_detections)
+#   "scores": confidence scores, shape (num_images x num_detections)
 # }
 ```
 
-Results are `torch.Tensor`. Use `.numpy()` to get `np.ndarray` for post-processing. See the Datasets section below on more information about the `InferenceDataset`.
+Results are `np.ndarray`, ready for post-processing.
+
+Internally, `CenterNet.inference()` uses the `InferenceDataset` to load the data and apply default pre-processing (resize to 512x512, normalize with ImageNet statistics). It also convert bounding boxes' coordinates to original images' dimensions.
+
+To run inference on an image
+
+```python
+import torch
+import cv2
+
+img = cv2.imread("path/to/image")
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# pre-processing
+# resize to 512x512
+# normalize with imagenet statistics
+
+model = ...     # create a model as above
+model.eval()    # put model in evaluation mode
+
+# use CUDA if available
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = model.to(device)
+
+with torch.no_grad():
+    # add batch dimension and transfer to GPU if available
+    batch = {"image": img.unsqueeze(0).to(device)}
+    
+    encoded_outputs = model(batch)
+    detections = model.decode_detections(encoded_outputs)
+```
+
+`detections` have the same format as above, but results are `torch.Tensor`.
 
 ## Model architecture
 
@@ -239,9 +262,9 @@ COCO_root
 │   ├── instances_train2017.json
 │   ├── ...
 ├── images/
-|   ├── val2017/
-|   ├── train2017/
-|   ├── ...
+│   ├── val2017/
+│   ├── train2017/
+│   ├── ...
 ```
 
 If you have other datasets in COCO format, make sure they also have the above folder structure.
@@ -256,15 +279,61 @@ dataset = COCODataset("COCO_root", "val2017")
 
 ### Pascal VOC format
 
-WIP
+Folder structure:
+
+```bash
+VOC_root
+├── Annotations/
+│   ├── 00001.xml
+│   ├── 00002.xml
+│   ├── ...
+├── ImageSets/
+│   ├── Main/
+│       ├── train.txt
+│       ├── val.txt
+│       ├── ...
+├── JPEGImages/
+│   ├── 00001.jpg
+│   ├── 00002.jpg
+│   ├── ...
+```
+
+All images inside the `JPEGImages` folder must have file extension `.jpg`. All annotation files inside the `Annotations` folder must have file extension `.xml`. Dataset splits inside `ImageSets/Main` folder must have file extension `.txt`.
+
+The names inside a dataset split file (e.g. `train.txt`) is a list of names without file extension, separated by a line break character.
+
+```python
+from src.datasets import VOCDataset
+
+name_to_label = {
+    "person": 0,
+    "table": 1,
+    ...
+}
+dataset = VOCDataset("VOC_root", "train", name_to_label=name_to_label)
+```
+
+`name_to_label` is optional, but required for training. Since annotation files only contain the string names (e.g. `person` or `car`), you need to map them to integer labels for training.
 
 ### Inference dataset
 
 ```python
 from src.datasets import InferenceDataset
 
-dataset = InferenceDataset("path/to/images")
+dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"], resize_height=512, resize_width=512)
+
+# dataset[0] = {
+#   "image_path": full path to the image
+#   "image": image tensor in CHW format
+#   "original_width": original image width, to convert bboxes if needed
+#   "original_height": same as above
+# }
 ```
+
+- `img_names` is optional. if not provided, the dataset will use all JPEG images found in the folder `img_dir`.
+- `resize_height` and `resize_width`: image dimensions when input to the model. Default to 512x512, the resolution 
+
+Inference dataset does not need a custom collate function. You can create a data loader directly from an inference dataset instance.
 
 ### Custom dataset for training
 
