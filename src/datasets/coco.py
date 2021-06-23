@@ -14,8 +14,8 @@ from .utils import get_default_transforms
 def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
     ann_file = os.path.join(ann_dir, f"instances_{split}.json")
     det_file = os.path.join(ann_dir, f"detections_{split}.pkl")
-    label_to_name_file = os.path.join(ann_dir, "label_to_name.json")
-    label_to_id_file   = os.path.join(ann_dir, "label_to_id.json")
+    label_to_name_file = os.path.join(ann_dir, f"label_to_name_{split}.json")
+    label_to_id_file   = os.path.join(ann_dir, f"label_to_id_{split}.json")
 
     # if already exist on disk, don't do anything
     if not overwrite and os.path.exists(det_file) and os.path.exists(label_to_name_file) and os.path.exists(label_to_id_file):
