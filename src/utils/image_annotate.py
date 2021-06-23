@@ -171,7 +171,7 @@ class LogImageCallback(pl.Callback):
             
             detections_target["bboxes"][-1][...,[0,2]] *= img_width
             detections_target["bboxes"][-1][...,[1,3]] *= img_height
-            convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1])
+            convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1], inplace=True)
 
             # only key "image" is need to run inference
             img = {"image": img.unsqueeze(0).to(pl_module.device)}
@@ -180,7 +180,7 @@ class LogImageCallback(pl.Callback):
 
             for k in detections_pred.keys():
                 detections_pred[k].append(pred_detections[k][0].cpu().numpy())
-            convert_cxcywh_to_x1y1x2y2(detections_pred["bboxes"][-1])
+            convert_cxcywh_to_x1y1x2y2(detections_pred["bboxes"][-1], inplace=True)
 
             # log heatmap output
             heatmap_output = encoded_outputs["heatmap"][0].cpu().float()    # 80 x 128 x 128

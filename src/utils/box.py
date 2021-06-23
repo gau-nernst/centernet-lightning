@@ -1,6 +1,6 @@
 import numpy as np
 
-def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=True):
+def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=False):
     """Convert bboxes from xywh format to cxcywh format. Default is inplace
     """
     if not inplace:
@@ -10,7 +10,7 @@ def convert_xywh_to_cxcywh(bboxes: np.ndarray, inplace=True):
     bboxes[...,1] += bboxes[...,3] / 2      # cy = y + h/2
     return bboxes
 
-def convert_cxcywh_to_xywh(bboxes: np.ndarray, inplace=True):
+def convert_cxcywh_to_xywh(bboxes: np.ndarray, inplace=False):
     """Convert bboxes from cxcywh format to xywh format. Default is inplace
     """
     if not inplace:
@@ -20,7 +20,7 @@ def convert_cxcywh_to_xywh(bboxes: np.ndarray, inplace=True):
     bboxes[...,1] -= bboxes[...,3] / 2      # y = cy - h/2
     return bboxes
 
-def convert_xywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
+def convert_xywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=False):
     if not inplace:
         bboxes = bboxes.copy()
     
@@ -28,7 +28,7 @@ def convert_xywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
     bboxes[...,3] += bboxes[...,1]          # y2 = x1 + h
     return bboxes
 
-def convert_x1y1x2y2_to_xywh(bboxes: np.ndarray, inplace=True):
+def convert_x1y1x2y2_to_xywh(bboxes: np.ndarray, inplace=False):
     if not inplace:
         bboxes = bboxes.copy()
 
@@ -36,7 +36,7 @@ def convert_x1y1x2y2_to_xywh(bboxes: np.ndarray, inplace=True):
     bboxes[...,3] -= bboxes[...,1]          # h = y2 - y1
     return bboxes
 
-def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
+def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=False):
     """Convert bboxes from cxcywh format to x1y2x2y2 format. Default is inplace
     """
     if not inplace:
@@ -46,7 +46,7 @@ def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=True):
     convert_xywh_to_x1y1x2y2(bboxes)
     return bboxes
 
-def convert_x1y1x2y2_to_cxcywh(bboxes: np.ndarray, inplace=True):
+def convert_x1y1x2y2_to_cxcywh(bboxes: np.ndarray, inplace=False):
     if not inplace:
         bboxes = bboxes.copy()
     
