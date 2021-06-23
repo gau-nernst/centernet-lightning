@@ -8,6 +8,7 @@ import argparse
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import LearningRateMonitor
+import wandb
 
 from src.models import build_centernet_from_cfg
 from src.datasets.builder import build_dataloader
@@ -42,6 +43,7 @@ def train(config: Union[str, Dict]):
     )
    
     trainer.fit(model, train_dataloader, val_dataloader)
+    wandb.finish()
 
 def parse_logger_config(logger_cfg, model):
     logger_name = logger_cfg["name"]
