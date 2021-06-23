@@ -16,7 +16,8 @@ Main dependencies
 - opencv-python
 - pytorch-lightning
 - pycocotools (to read COCO dataset. Cython is required. Use [gautamchitnis](https://github.com/gautamchitnis/cocoapi) fork to support Windows)
-- albumentations (for augmentations)
+- albumentations (for augmentations during training)
+- numba (to speed up some calculations on CPU)
 
 Other dependencies
 
@@ -45,7 +46,7 @@ In Windows, replace `-c nvidia` with `-c conda-forge`. If you don't have NVIDIA 
 Install other dependencies
 
 ```bash
-pip install cython, pytorch-lightning, opencv-python
+pip install cython, pytorch-lightning, opencv-python, numba
 pip install -U albumentations --no-binary imgaug,albumentations
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
 
@@ -55,28 +56,53 @@ pip install pytest, wandb
 
 ## Usage
 
-Import `build_centernet_from_cfg` from `model.py` to create a CenterNet model from a YAML file. Sample config files are provided in the `config/` directory.
+### Model creation
+
+Import `build_centernet_from_cfg` from `model.py` to build a CenterNet model from a YAML file. Sample config files are provided in the `config/` directory.
 
 ```python
-from model import build_centernet_from_cfg
+from src.models import build_centernet_from_cfg
 
 model = build_centernet_from_cfg("configs/coco_resnet34.yaml")
 ```
 
-To run inference
+You also can load a CenterNet model directly from a checkpoint thanks to PyTorch Lightning.
 
 ```python
-import cv2
+from src.models import CenterNet
 
-img = cv2.imread("sample_img.jpg")
-img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-img = np.transpose(img, (1,2,0))        # HWC to CHW
-img = {"image": torch.from_numpy(img).unsqueeze(1)}
+model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
+```
 
-model.eval()
-with torch.no_grad():
-    encoded_outputs = model(img)
-    detections = model.decode_detections(encoded_outputs, num_detections=10)
+### Inference
+
+To run inference on an image: WIP
+
+If you want to run inference on a folder of images, use the `InferenceDataset`. It will perform the pre-processing for you (resize to 512x512, normalize with ImageNet statistics).
+
+```python
+import torch
+from torch.utils.data import DataLoader
+from src.datasets import InferenceDataset
+
+model = ...     # create a model as above
+model.eval()    # put model in evaluation mode
+
+# create dataset
+# img_names is optional. if not provided, the dataset will use all JPEG images in the folder
+dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"])
+dataloader = DataLoader(dataset)
+
+# use CUDA if available
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = model.to(device)
+
+with torch.no_grad():           # turn of gradient
+    for batch in dataloader:
+        batch = {k: v.to(device) for k,v in batch.items()}  # transfer to GPU if available
+
+        encoded_outputs = model(batch)
+        detections = model.decode_detections(encoded_outputs, num_detections=10)
 
 # detections = {
 #   "bboxes": bounding boxes in cxcywh format, shape (batch x num_detections x 4)
@@ -85,11 +111,11 @@ with torch.no_grad():
 # }
 ```
 
-Results are `torch.Tensor`. Use `.numpy()` to get `np.ndarray`.
+Results are `torch.Tensor`. Use `.numpy()` to get `np.ndarray` for post-processing. See the Datasets section below on more information about the `InferenceDataset`.
 
 ## Model architecture
 
-The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the specified output heads in parallel. The `CenterNet` class also implements a few functions to help with training and running detections.
+The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the specified output heads in parallel.
 
 Backbones:
 
@@ -97,14 +123,14 @@ Backbones:
 - [x] `FPNBackbone`: a base CNN network with a feature pyramid to fuse feature maps at different resolutions.
 - [ ] `IDABackbone`: not implemented
 - [ ] `DLABackbone`: not implemented. The author claims this is the best backbone for CenterNet/Track
-- [ ] `BiFPNBackbone`: not implemented. This is an upgraded version of FPN, introduced by the EfficientDet paper. CenterNet2 also uses this new backbone
+- [ ] `BiFPNBackbone`: not implemented. This is an upgraded version of FPN, introduced in the EfficientDet paper. CenterNet2 also uses this new backbone
 
 Since CenterNet performs single-scale detection, feature map fusion is very important to achieve good performance.
 
 Output heads:
 
 - [x] `heatmap`: compulsory, class scores at each position
-- [x] `size`: (relative) width and height regression, to determin bounding box size
+- [x] `size`: width and height regression, to determine bounding box size
 - [x] `offset`: center x and y offset regression, to refine center's position
 - [ ] `displacement`: for CenterTrack, not implemented
 
@@ -115,7 +141,18 @@ Base CNNs:
 - [x] (torchvision) ResNet family (resnet, resnext, wide resnet)
 - [x] (torchvision) MobileNet family (v2, v3-large, v3-small)
 
+### The `CenterNet` class
+
+The `CenterNet` class is a Lightning Module. Key methods:
+
+- `__init__()`: constructor to build the network from hyperparameters. Pass in a config dictionary, or use the helper function `build_centernet_from_cfg()` instead.
+- `forward()`: forward pass behavior returns the encoded outputs from the output heads. This includes `heatmap`, `size`, and `offset` outputs. The encoded outputs are then used for computing loss or decoding to detections.
+- `compute_loss()`: pass in the encoded outputs from forward pass to calculate losses for each output head and total loss.
+- `decode_detections()`: pass in the encoded outputs from forward pass to decode to bboxes, labels, and scores predictions
+
 ## Training
+
+### Using train script
 
 To train the model, run `train.py` and specify the config file.
 
@@ -126,69 +163,105 @@ python train.py --config "configs/coco_resnet34.yaml"
 The config file specifies everything required to train the model, including model construction, dataset, augmentations and training schedule.
 
 - Customize model architecture: See above.
-- Train on custom dataset: Not possible to specify in the config file for now. See below on how to write your custom dataset.
+- Train on custom dataset: Datasets in COCO and Pascal VOC formats are supported. See the Datasets section below.
 - Add custom augmentations: Only Albumentation transformations are supported. This is because Albumentation will handle transforming bounding boxes for us. To specify a new augmentation, simply add to the list `transforms` under each dataset.
-- Training epochs: You can change it in the config file
-- Optimizer: Optimizers are taken from the official PyTorch library, so you can specify any of them in the config file. To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
-- Learning rate schedule: Similar to optimizers, learning rate schedulers are takken from the official PyTorch library. To use other learning rate schedulers, modify the `configure_optimizers()` method.
+- Training epochs: Change `params/max_epochs` under `trainer`
+- Optimizer: Change `optimizer` under `model`. Only optimizers from the official PyTorch is supported (in `torch.optim`). To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
+- Learning rate schedule: Change `lr_scheduler` under `model`. The schedulers are taken from the official PyTorch, but not all are supported. To use other learning rate schedulers, modify the `configure_optimizers()` method.
 
-## Dataset
+You can also import the `train()` function from the train script to train in your own script. You can either pass in path to your config file, or pass in a config dictionary directly.
 
-Currently only COCO dataset is supported for training. A simple `InferenceDataset` class can be used for inference only.
+```python
+from train import train
 
-### COCO dataset
+train("config_file.yaml")
+```
 
-Download and unzip the COCO dataset. It should have the following folder structure
+As `train()` also accept a config dictionary, you can load the config file as a dictionary and directly modify its values before passing to `train()`.
+
+```python
+import yaml
+from train import train
+
+# load the config file
+config_file = "config_file.yaml"
+with open(config_file, "r") as f:
+    config = yaml.load(f, Loader=yaml.FullLoader)
+
+# modify config file parameters
+config["model"]["backbone"]["name"] = "resnet50"
+config["trainer"]["params"]["max_epochs"] = 10
+
+# run the training
+train(config)
+```
+
+### Manual training
+
+Since `CenterNet` is a Lightning module, you can train it like any other Lightning module. Consult PyTorch Lightning documentation for more information.
+
+```python
+import pytorch_lightning as pl
+
+model = ...     # create a model as above
+
+trainer = pl.Trainer(
+    gpus=1,
+    max_epochs=10,
+)
+
+trainer.fit(model, train_dataloader, val_dataloader)
+```
+
+See the Datasets section below on how to create datasets for `CenterNet`.
+
+## Datasets
+
+Supported dataset formats
+
+- COCO
+- Pascal VOC
+
+There is also `InferenceDataset` class for simple inference.
+
+### Dataset and dataloader builder
+
+WIP
+
+### COCO format
+
+Download and unzip the COCO dataset. The root dataset folder should have folders `annotations` and `images` like the following:
 
 ```bash
-COCO
+COCO_root
 ├── annotations/
 │   ├── instances_val2017.json
 │   ├── instances_train2017.json
 │   ├── ...
-├── val2017/
-├── train2017/
+├── images/
+|   ├── val2017/
+|   ├── train2017/
+|   ├── ...
 ```
 
-Lightning Datamodule is used to prepare the dataset. Pass in a config dictionary to initialize the data module. Check sample config files for the structure and possible options.
+If you have other datasets in COCO format, make sure they also have the above folder structure.
+
+To create a COCO dataset:
 
 ```python
-from datasets import COCODataModule
+from src.datasets import COCODataset
 
-train_cfg = {
-    "data_dir": "datasets/COCO",
-    "coco_version": "train2017",
-    "dataloader_params": {"batch_size": 4}
-}
-val_cfg = {
-    "data_dir": "datasets/COCO",
-    "coco_version": "val2017",
-    "dataloader_params": {"batch_size": 4}
-}
-
-coco_datamodule = COCODataModule(train=train_cfg, validation=val_cfg)
-coco_datamodule.setup()         # process coco annotations
-
-train_dataloader = coco_datamodule.train_dataloader()
-val_dataloader = coco_datamodule.val_dataloader()
+dataset = COCODataset("COCO_root", "val2017")
 ```
 
-`pycocotools` loads all annotation data into memory, which can be very large for COCO train set. `.setup()` method will run `prepare_coco_detection()` function to extract only the necessary information for the detection task (image file paths, bounding boxes and labels). 
+### Pascal VOC format
 
-You can also directly use the class `COCODataset`, but make sure to run `prepare_coco_detection()` before creating the dataset.
-
-```python
-from datasets import prepare_coco_detection, COCODataset
-
-coco_dir = "datsets/COCO"
-prepare_coco_detection(coco_dir, "val2017")
-val_coco_ds = COCODataset(coco_dir, "val2017", transforms=...)
-```
+WIP
 
 ### Inference dataset
 
 ```python
-from datasets import InferenceDataset
+from src.datasets import InferenceDataset
 
 dataset = InferenceDataset("path/to/images")
 ```
@@ -203,6 +276,10 @@ You can write your own custom dataset, as long as it conforms to the format that
 - `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same lengths within one batch. This is used in calculating loss. Shape `ND`.
 
 If you only need inference, only key `image` is needed.
+
+### Dataloader and collate function
+
+WIP
 
 ## Notes
 
