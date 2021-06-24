@@ -6,3 +6,5 @@ wandb/
 .env
 .idea
 *results.json
+*.pt
+*.pth
