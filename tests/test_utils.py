@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from ..utils import *
+from src.utils import *
 
 box_convert_fn = [
     convert_xywh_to_x1y1x2y2,
@@ -20,9 +20,9 @@ class TestBoxConversion:
         box1 = np.random.rand(4,10,4)
         for convert_fn in box_convert_fn:
             box2 = convert_fn(box1)
-            assert box2 is box1
-            box2 = convert_fn(box1, inplace=False)
             assert box2 is not box1
+            box2 = convert_fn(box1, inplace=True)
+            assert box2 is box1
 
     def test_xywh_and_x1y1x2y2(self):
         new_box = convert_xywh_to_x1y1x2y2(self.xywh_box, inplace=False)
@@ -73,10 +73,11 @@ def test_apply_mpl_cmap():
     img_new = apply_mpl_cmap(img, "viridis", channel_first=True)
     assert img_new.shape == (4,3,128,128)
 
-def test_log_image_callback():
-    callback = LogImageCallback("datasets/COCO/val2017", "datasets/COCO/val2017/detections.pkl")
-    callback = LogImageCallback("datasets/COCO/val2017", "datasets/COCO/val2017/detections.pkl", 10)
-    callback = LogImageCallback("datasets/COCO/val2017", "datasets/COCO/val2017/detections.pkl", range(10))
+# def test_log_image_callback():
+#     config = None
+#     callback = LogImageCallback(config)
+#     callback = LogImageCallback(config, 10)
+#     callback = LogImageCallback(config, range(10))
 
 def test_make_image_grid():
     num_samples = 16
