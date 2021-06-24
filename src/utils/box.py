@@ -42,14 +42,14 @@ def convert_cxcywh_to_x1y1x2y2(bboxes: np.ndarray, inplace=False):
     if not inplace:
         bboxes = bboxes.copy()
     
-    convert_cxcywh_to_xywh(bboxes)
-    convert_xywh_to_x1y1x2y2(bboxes)
+    convert_cxcywh_to_xywh(bboxes, inplace=True)
+    convert_xywh_to_x1y1x2y2(bboxes, inplace=True)
     return bboxes
 
 def convert_x1y1x2y2_to_cxcywh(bboxes: np.ndarray, inplace=False):
     if not inplace:
         bboxes = bboxes.copy()
     
-    convert_x1y1x2y2_to_xywh(bboxes)
-    convert_xywh_to_cxcywh(bboxes)
+    convert_x1y1x2y2_to_xywh(bboxes, inplace=True)
+    convert_xywh_to_cxcywh(bboxes, inplace=True)
     return bboxes
