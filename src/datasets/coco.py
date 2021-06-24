@@ -49,24 +49,28 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
         img_bboxes = []
         img_labels = []
         for detection in ann:   # inner loop is loop over detections in an image
-            box = detection["bbox"]
+            x1, y1, w, h = detection["bbox"]
             cat_id = detection["category_id"]
 
             # ignore boxes with width and height < 1. this will crash albumentation
-            if box[2] < 1 or box[3] < 1:
+            if w < 1 or h < 1:
                 continue
-        
-            # convert xywh to cxcywh
-            box[0] += box[2] / 2 
-            box[1] += box[3] / 2
+            
+            # clip boxes
+            x2 = x1 + w
+            y2 = y1 + h
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(img_width-1, x2)
+            y2 = min(img_height-1, y2)
 
-            # normalize coordinates to [0,1]
-            box[0] /= img_width
-            box[1] /= img_height
-            box[2] /= img_width
-            box[3] /= img_height
+            # convert xywh to cxcywh and normalize to [0,1]
+            cx = (x1 + x2) / 2 / img_width
+            cy = (y1 + y2) / 2 / img_height
+            w = (x2 - x1) / 2 / img_width
+            h = (y2 - y1) / 2 / img_height
 
-            img_bboxes.append(box)
+            img_bboxes.append([cx,cy,w,h])
             img_labels.append(id_to_label[cat_id])
 
         bboxes.append(img_bboxes)
