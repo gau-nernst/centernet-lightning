@@ -52,10 +52,6 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
             x1, y1, w, h = detection["bbox"]
             cat_id = detection["category_id"]
 
-            # ignore boxes with width and height < 1. this will crash albumentation
-            if w < 1 or h < 1:
-                continue
-            
             # clip boxes
             x2 = x1 + w
             y2 = y1 + h
@@ -64,11 +60,17 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
             x2 = min(img_width-1, x2)
             y2 = min(img_height-1, y2)
 
+            # ignore boxes with width and height < 1. this will crash albumentation
+            w = x2 - x1
+            h = y2 - y1
+            if w < 1 or h < 1:
+                continue
+
             # convert xywh to cxcywh and normalize to [0,1]
             cx = (x1 + x2) / 2 / img_width
             cy = (y1 + y2) / 2 / img_height
-            w = (x2 - x1) / 2 / img_width
-            h = (y2 - y1) / 2 / img_height
+            w = w / 2 / img_width
+            h = h / 2 / img_height
 
             img_bboxes.append([cx,cy,w,h])
             img_labels.append(id_to_label[cat_id])
