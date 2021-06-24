@@ -52,12 +52,11 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
             box = detection["bbox"]
             cat_id = detection["category_id"]
 
-            # clip width and height
+            # ignore boxes with width and height < 1. this will crash albumentation
+            if box[2] < 1 or box[3] < 1:
+                continue
+        
             # convert xywh to cxcywh
-            box[2] = max(box[2], 1)  
-            box[3] = max(box[3], 1)
-            box[2] = min(box[2], img_width-box[0]-1)
-            box[3] = min(box[3], img_height-box[1]-1)
             box[0] += box[2] / 2 
             box[1] += box[3] / 2
 
