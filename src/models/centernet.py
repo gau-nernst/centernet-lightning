@@ -24,18 +24,24 @@ _output_head_channels = {
     "offset": 2
 }
 
+def _make_output_head(in_channels: int, hidden_channels: int, out_channels: int, fill_bias: float = None):
+    # Reference implementations
+    # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
+    # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
+    conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1)
+    relu = nn.ReLU(inplace=True)
+    conv2 = nn.Conv2d(hidden_channels, out_channels, 1)
+
+    if fill_bias is not None:
+        conv2.bias.data.fill_(fill_bias)
+
+    output_head = nn.Sequential(conv1, relu, conv2)
+    return output_head
+
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
     """
-    def __init__(
-        self,
-        backbone: Dict, 
-        num_classes: int,
-        output_heads: Dict = None,
-        optimizer: Dict = None,
-        lr_scheduler: Dict = None,
-        **kwargs
-        ):
+    def __init__(self, backbone: Dict, num_classes: int, output_heads: Dict = None, optimizer: Dict = None, lr_scheduler: Dict = None, **kwargs):
         super(CenterNet, self).__init__()
 
         self.backbone = build_backbone(**backbone)        
@@ -52,7 +58,8 @@ class CenterNet(pl.LightningModule):
         # create output heads and set their losses
         self.output_heads = nn.ModuleDict()
         self.head_loss_fn = nn.ModuleDict()
-        self.output_heads["heatmap"] = self._make_output_head(
+        self.output_heads["heatmap"] = _make_output_head(
+            backbone_channels,
             backbone_channels,
             num_classes,
             fill_bias=fill_bias["heatmap"]
@@ -64,7 +71,8 @@ class CenterNet(pl.LightningModule):
             assert h in _supported_heads
             assert h in loss_weights
             assert h in loss_functions
-            head = self._make_output_head(
+            head = _make_output_head(
+                backbone_channels,
                 backbone_channels,
                 _output_head_channels[h],
                 fill_bias=fill_bias[h]
@@ -85,26 +93,10 @@ class CenterNet(pl.LightningModule):
         self.save_hyperparameters()
         self._steps_per_epoch = None        # for steps_per_epoch property
 
-    def _make_output_head(self, in_channels: int, out_channels: int, fill_bias: float = None):
-        # Reference implementations
-        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
-        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
-        conv1 = nn.Conv2d(in_channels, in_channels, 3, padding=1)
-        relu = nn.ReLU(inplace=True)
-        conv2 = nn.Conv2d(in_channels, out_channels, 1)
-
-        if fill_bias is not None:
-            conv2.bias.data.fill_(fill_bias)
-
-        output_head = nn.Sequential(conv1, relu, conv2)
-        return output_head
-
-    def forward(self, batch):
+    def forward(self, images):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections.
         """
-        img = batch["image"]
-
-        features = self.backbone(img)
+        features = self.backbone(images)
         output = {}
         output["backbone_features"] = features      # for logging purpose
         
@@ -170,7 +162,7 @@ class CenterNet(pl.LightningModule):
         """Decode model output to detections
 
         Args
-            encoded_outputs: outputs after calling forward pass `model(batch)`
+            encoded_outputs: outputs after calling forward pass `model(images)`
             num_detections: number of detections to return. Default is 100
             nms_kernel: the kernel used for max pooling (pseudo-nms). Larger values will reduce false positives. Default is 3 (original paper)
             normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
@@ -232,7 +224,7 @@ class CenterNet(pl.LightningModule):
 
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
-        encoded_outputs = self(batch)
+        encoded_outputs = self(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
@@ -246,13 +238,13 @@ class CenterNet(pl.LightningModule):
         return losses["total"]
 
     def validation_step(self, batch, batch_idx):
-        encoded_outputs = self(batch)
+        encoded_outputs = self(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
 
     def test_step(self, batch, batch_idx):
-        encoded_outputs = self(batch)
+        encoded_outputs = self(batch["image"])
         detections = self.decode_detections(encoded_outputs)
 
     @torch.no_grad()
@@ -270,10 +262,8 @@ class CenterNet(pl.LightningModule):
         for batch in dataloader:
             img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
             img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
-            
-            batch = {"image": batch["image"].to(self.device)}
 
-            encoded_outputs = self(batch)
+            encoded_outputs = self(batch["image"].to(self.device))
             detections = self.decode_detections(encoded_outputs, num_detections=num_detections, nms_kernel=nms_kernel, normalize_bbox=True)
             detections = {k: v.cpu().float().numpy() for k,v in detections.items()}
 
@@ -352,3 +342,42 @@ class CenterNet(pl.LightningModule):
             }
         }
         return return_dict
+
+class CenterNetDetectionTorchScript(nn.Module):
+    def __init__(self, backbone: Dict, num_classes: int, **kwargs):
+        super().__init__()
+        self.backbone = build_backbone(**backbone)        
+        backbone_channels = self.backbone.out_channels
+
+        self.output_heatmap = _make_output_head(backbone_channels, backbone_channels, num_classes)
+        self.output_size = _make_output_head(backbone_channels, backbone_channels, 2)
+        self.output_offset = _make_output_head(backbone_channels, backbone_channels, 2)
+    
+    @classmethod
+    def load_centernet_from_checkpoint(cls, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        hparams = checkpoint["hyper_parameters"]
+        state_dict = checkpoint["state_dict"]
+
+        model = cls(**hparams)
+
+        output_weights = [x for x in state_dict.keys() if x.startswith("output_heads.")]
+        remove_length = len("output_heads.")
+
+        for old_key in output_weights:
+            new_key = "output_" + old_key[remove_length:]
+            state_dict[new_key] = state_dict[old_key]
+            del state_dict[old_key]
+
+        model.load_state_dict(state_dict)
+        return model
+
+    def forward(self, images):
+        features = self.backbone(images)
+
+        heatmap = self.output_heatmap(features)
+        heatmap = torch.sigmoid(heatmap)
+        size = self.output_size(features)
+        offset = self.output_offset(features)
+
+        return heatmap, size, offset

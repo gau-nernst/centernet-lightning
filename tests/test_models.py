@@ -26,18 +26,18 @@ class TestModels:
         assert isinstance(model, CenterNet)
         assert isinstance(model.backbone, SimpleBackbone)
 
-        model(sample_input)
+        model(sample_input["image"])
     
     # def test_build_all_configs(self):
     #     configs = os.listdir("configs")
     #     configs = [os.path.join("configs", cfg) for cfg in configs]
     #     for cfg in configs:
     #         model = build_centernet_from_cfg(cfg)
-    #         model(sample_input)
+    #         model(sample_input["image"])
 
     def test_forward_pass(self):
         model = build_centernet_from_cfg(sample_cfg)
-        output = model(sample_input)
+        output = model(sample_input["image"])
         
         for x in ["heatmap", "size", "offset"]:
             assert x in output

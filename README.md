@@ -109,28 +109,38 @@ Internally, `CenterNet.inference()` uses the `InferenceDataset` to load the data
 To run inference on an image
 
 ```python
+import numpy as np
 import torch
 import cv2
 
+# if CUDA is available
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# read image from file and normalize to [0,1]
 img = cv2.imread("path/to/image")
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+img = img.astype(np.float32) / 255
 
-# pre-processing
-# resize to 512x512
-# normalize with imagenet statistics
+# optional pre-processing: resize to 512x512 and normalize with ImageNet statistics
+imagenet_mean = np.array([0.485, 0.456, 0.406])
+imagenet_std = np.array([0.229, 0.224, 0.225])
+img = cv2.resize(img, (512,512))
+img = (img - imagenet_mean) / imagenet_std
 
-model = ...     # create a model as above
-model.eval()    # put model in evaluation mode
+# required pre-processing: convert from HWC to CHW format, make it a tensor and add batch dimension
+img = img.transpose(2,0,1)
+img = torch.from_numpy(img).unsqueeze(0)
+
+# create a model as above and put it in evaluation mode
+model = ...     
+model.eval()
 
 # use CUDA if available
-device = "cuda" if torch.cuda.is_available() else "cpu"
 model = model.to(device)
+img = img.to(device)
 
 with torch.no_grad():
-    # add batch dimension and transfer to GPU if available
-    batch = {"image": img.unsqueeze(0).to(device)}
-    
-    encoded_outputs = model(batch)
+    encoded_outputs = model(img)
     detections = model.decode_detections(encoded_outputs)
 ```
 
