@@ -69,8 +69,8 @@ def prepare_coco_detection(ann_dir: str, split: str, overwrite: bool = False):
             # convert xywh to cxcywh and normalize to [0,1]
             cx = (x1 + x2) / 2 / img_width
             cy = (y1 + y2) / 2 / img_height
-            w = w / 2 / img_width
-            h = h / 2 / img_height
+            w /= img_width
+            h /= img_height
 
             img_bboxes.append([cx,cy,w,h])
             img_labels.append(id_to_label[cat_id])
