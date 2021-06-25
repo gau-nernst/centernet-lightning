@@ -1,4 +1,5 @@
 from typing import Dict, Iterable
+import math
 
 import numpy as np
 import torch
@@ -139,11 +140,11 @@ def render_target_heatmap_cornernet(
 
         # calculate gaussian radius and clamp to 0
         radius = cornernet_gaussian_radius(w, h, min_overlap=min_overlap)
-        radius = np.min(radius, 0)
+        radius = min(radius, 0)
 
         # calculate gaussian variance
         diameter = 2 * radius + 1
-        var = np.square(diameter / 6)
+        var = math.square(diameter / 6)
         r = int(radius)
 
         # grid for the gaussian
@@ -176,19 +177,19 @@ def cornernet_gaussian_radius(width: float, height: float, min_overlap: float = 
     a1 = 1
     b1 = height + width
     c1 = width * height * (1 - min_overlap) / (1 + min_overlap)
-    sq1 = np.sqrt(b1 * b1 - 4 * a1 * c1)
+    sq1 = math.sqrt(b1 * b1 - 4 * a1 * c1)
     r1 = (b1 - sq1) / (2 * a1)
 
     a2 = 4
     b2 = 2 * (height + width)
     c2 = (1 - min_overlap) * width * height
-    sq2 = np.sqrt(b2 * b2 - 4 * a2 * c2)
+    sq2 = math.sqrt(b2 * b2 - 4 * a2 * c2)
     r2 = (b2 - sq2) / (2 * a2)
 
     a3 = 4 * min_overlap
     b3 = -2 * min_overlap * (height + width)
     c3 = (min_overlap - 1) * width * height
-    sq3 = np.sqrt(b3 * b3 - 4 * a3 * c3)
+    sq3 = math.sqrt(b3 * b3 - 4 * a3 * c3)
     r3 = (b3 + sq3) / (2 * a3)
 
     return min(r1, r2, r3)

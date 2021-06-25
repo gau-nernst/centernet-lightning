@@ -1,62 +1,20 @@
+__base__: base_resnet34.yaml
+
 model:
-  backbone:
-    name: resnet34
-    upsample_channels: [256, 128, 64]
-    upsample_block:
-      upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
-      conv_type: normal                 # normal, separable, dcn
-      deconv_kernel: 4                  # only used with conv_transpose
-      init_bilinear: True               # only used with conv_transpose
-  
   num_classes: 80
-  heatmap_method: cornernet       # cornernet or ttfnet
-
-  output_heads:
-    other_heads: [size, offset]
-    fill_bias: 
-      heatmap: -2.19
-      size: 0
-      offset: 0
-    loss_weights:
-      size: 0.1
-      offset: 1
-    loss_functions:
-      size: L1Loss      # a loss from torch.nn e.g. L1Loss, SmoothL1Loss
-      offset: L1Loss
-
-  optimizer:           # mmdetection
-    name: SGD          # any optimizers from torch.optim
-    params:
-      lr: 0.02
-      momentum: 0.9
-      weight_decay: 0.0001
-
-  lr_scheduler:
-    name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
-    params:
-      max_lr: 0.02
 
 data:
   train:
     type: coco
     dataset_params:
-      data_dir: datasets/COCO/
+      data_dir: datasets/COCO
       split: train2017
-    
-    dataloader_params:
-      batch_size: 32
-      num_workers: 8
-      shuffle: True
-      pin_memory: True
-    
+  
     transforms:
-      # augmentations used in CenterNet paper
-      # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
-      # they also used PCA augmentation, but didn't mention in their paper
-      - name: HorizontalFlip        # any transformations from Albumentation
+      - name: HorizontalFlip
         params:
           p: 0.5
-      - name: RandomResizedCrop
+      - name: Resize
         params:
           height: 512
           width: 512
@@ -69,33 +27,16 @@ data:
   validation:
     type: coco
     dataset_params:
-      data_dir: datasets/COCO/
+      data_dir: datasets/COCO
       split: val2017
-    
-    dataloader_params:
-      batch_size: 32
-      num_workers: 8
-      shuffle: False
-      pin_memory: True
-    
-    transforms:
-      - name: Resize
-        params:
-          height: 512
-          width: 512
 
 trainer:
   params:
-    gpus: 1
-    precision: 16
     max_epochs: 10
-    # limit_val_batches: 20
-    val_check_interval: 0.5
-    benchmark: True
-    gradient_clip_val: 35     # mmdetection
-
+  
   logger:
-    name: wandb         # tensorboard or wandb
+    name: wandb
     params:
-      project: centernet
+      project: coco-centernet
       log_model: True
+  

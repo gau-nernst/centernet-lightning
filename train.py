@@ -12,7 +12,7 @@ import wandb
 
 from src.models import build_centernet_from_cfg
 from src.datasets.builder import build_dataloader
-from src.utils import LogImageCallback
+from src.utils import LogImageCallback, load_config
 
 def train(config: Union[str, Dict]):
     """Train CenterNet from a config.
@@ -23,8 +23,9 @@ def train(config: Union[str, Dict]):
     # load config file
     if type(config) == str:
         assert os.path.exists(config), f"{config} does not exist"
-        with open(config, "r") as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
+        # with open(config, "r") as f:
+        #     config = yaml.load(f, Loader=yaml.FullLoader)
+        config = load_config(config)
 
     # build model and dataset
     model = build_centernet_from_cfg(config["model"])
