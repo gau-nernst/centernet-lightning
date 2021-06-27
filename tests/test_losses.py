@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from src.losses import FocalLossWithLogits
+from src.losses import ModifiedFocalLossWithLogits
 from src.losses.utils import reference_focal_loss
 from src.datasets import render_target_heatmap_cornernet, render_target_heatmap_ttfnet
 

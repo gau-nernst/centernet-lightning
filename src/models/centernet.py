@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
 from ..backbones import build_backbone
-from ..losses import FocalLossWithLogits
+from ..losses import ModifiedFocalLossWithLogits
 from ..datasets import InferenceDataset
 from ..utils import convert_cxcywh_to_xywh
 from ..eval import detections_to_coco_results
@@ -64,7 +64,7 @@ class CenterNet(pl.LightningModule):
             num_classes,
             fill_bias=fill_bias["heatmap"]
         )
-        self.head_loss_fn["heatmap"] = FocalLossWithLogits(alpha=2., beta=4.)       # focal loss for heatmap
+        self.head_loss_fn["heatmap"] = ModifiedFocalLossWithLogits(alpha=2., beta=4., reduction="sum")       # focal loss for heatmap
         assert "heatmap" in loss_weights
 
         for h in other_heads:
@@ -150,6 +150,7 @@ class CenterNet(pl.LightningModule):
         N = torch.sum(mask) + eps
         losses["size"] /= N
         losses["offset"] /= N
+        losses["heatmap"] /= N
 
         total_loss = torch.tensor(0., dtype=losses["heatmap"].dtype, device=self.device)
         for k,v in losses.items():

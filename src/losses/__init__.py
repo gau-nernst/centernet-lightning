@@ -1,4 +1,4 @@
-from .focal_loss import FocalLossWithLogits
+from .focal_loss import ModifiedFocalLossWithLogits, QualityFocalLossWithLogits
 
 
-__all__ = ["FocalLossWithLogits"]
+__all__ = ["ModifiedFocalLossWithLogits", "QualityFocalLossWithLogits"]
