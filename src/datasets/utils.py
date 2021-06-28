@@ -140,11 +140,11 @@ def render_target_heatmap_cornernet(
 
         # calculate gaussian radius and clamp to 0
         radius = cornernet_gaussian_radius(w, h, min_overlap=min_overlap)
-        radius = min(radius, 0)
+        radius = max(radius, 0)
 
         # calculate gaussian variance
         diameter = 2 * radius + 1
-        var = math.square(diameter / 6)
+        var = np.square(diameter / 6)
         r = int(radius)
 
         # grid for the gaussian
