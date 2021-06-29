@@ -1,4 +1,5 @@
 import os
+
 import torch
 
 from src.models import CenterNet, build_centernet_from_cfg
@@ -9,13 +10,14 @@ sample_cfg = "configs/coco_resnet34.yaml"
 
 sample_input = {
     "image": torch.rand((4,3,512,512)),
-    "bboxes": torch.rand((4,10,4)) * 512,
-    "labels": torch.randint(0,78,(4,10)),
+    "bboxes": torch.rand((4,10,4)),
+    "labels": torch.randint(0,80,(4,10)),
+    "heatmap": torch.rand((4,80,128,128)),
     "mask": torch.randint(0,2,(4,10))
 }
 
 sample_output = {
-    "heatmap": torch.rand((4,78,128,128)),
+    "heatmap": torch.rand((4,80,128,128)),
     "size": torch.rand((4,2,128,128)) * 128,
     "offset": torch.rand((4,2,128,128))
 }
@@ -48,15 +50,14 @@ class TestModels:
         assert output["size"].shape == (4,2,128,128)
         assert output["offset"].shape == (4,2,128,128)
     
+    def test_compute_loss(self):
+        model = build_centernet_from_cfg(sample_cfg)
+        losses = model.compute_loss(sample_output, sample_input)
 
-    # def test_compute_loss(self):
-    #     model = build_centernet_from_cfg(sample_cfg)
-    #     losses = model.compute_loss(sample_output, sample_input)
-
-    #     # correct loss names and loss is not nan
-    #     for x in ["heatmap", "size", "offset"]:
-    #         assert x in losses
-    #         assert not torch.isnan(losses[x])
+        # correct loss names and loss is not nan
+        for x in ["heatmap", "size", "offset"]:
+            assert x in losses
+            assert not torch.isnan(losses[x])
 
     # def test_decode_detections(self):
     #     bboxes = torch.tensor([[

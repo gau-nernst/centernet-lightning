@@ -1,40 +1,124 @@
-import numpy as np
 import torch
-from src.losses import ModifiedFocalLossWithLogits
-from src.losses.utils import reference_focal_loss
-from src.datasets import render_target_heatmap_cornernet, render_target_heatmap_ttfnet
+from torchvision.ops import box_iou, generalized_box_iou
 
-class TestLosses:
-    def test_render_target_heatmap(self):
-        heatmap = np.zeros((3,128,128))
-        bboxes = [
-            [64,64,100,200],
-            [64,80,50,100],
-            [80,70,100,100]
-        ]
-        labels = [1,0,2]
-        bboxes_normalized = [[x/128 for x in box] for box in bboxes]
+from src.losses import focal_loss, iou_loss
 
-        heatmap = render_target_heatmap_ttfnet(heatmap, bboxes_normalized, labels)
+EPS = 1e-6
 
-        assert heatmap[labels[0], bboxes[0][1], bboxes[0][0]] == 1    # peak is 1
-        assert np.sum(heatmap == 1) == len(labels)
+class TestFocalLosses:
+    def test_modified_focal_loss(self):
+        loss = focal_loss.ModifiedFocalLossWithLogits()
+        # some points y = 1
+        # all y = 1
+        # all y = 0
+        pass
 
-        heatmap = render_target_heatmap_cornernet(heatmap, bboxes_normalized, labels)
+    def test_modified_focal_loss_stability(self):
+        loss = focal_loss.ModifiedFocalLossWithLogits()
+        # very negative inputs
+        # very small inputs
+        # very positive inputs
+        pass
 
-        assert heatmap[labels[0], bboxes[0][1], bboxes[0][0]] == 1    # peak is 1
-        assert np.sum(heatmap == 1) == len(labels)
+    def test_quality_focal_loss(self):
+        loss = focal_loss.QualityFocalLossWithLogits()
+        pass
 
-    # def test_focal_loss(self):
-    #     sample_output = torch.randn((4,3,128,128)) * 10 - 5
-    #     sample_logits = -torch.log((1-sample_output) / (sample_output+1e-8))
+    def test_quality_focal_loss_stability(self):
+        loss = focal_loss.QualityFocalLossWithLogits()
+        # very negative inputs
+        # very small inputs
+        # very positive inputs
+        pass
 
-    #     sample_target = torch.rand((4,3,128,128))
-    #     sample_target[0,0,64,64] = 1
-    #     sample_target[0,1,80,72] = 1
+class TestIoULosses:
+    def test_basic(self):
+        for LossFn in (iou_loss.CenterNetIoULoss, iou_loss.CenterNetGIoULoss):
+            loss_fn = LossFn(keepdim=False)
+            # random samples
+            boxes1 = torch.rand((4,10,2))
+            boxes2 = torch.rand((4,10,2))
+            
+            assert LossFn()(boxes1, boxes2).shape == (4,10,1)       # correct shape
+            assert loss_fn(boxes1, boxes2).shape == (4,10)          # correct shape
+            loss1 = loss_fn(boxes1, boxes2)
+            loss2 = loss_fn(boxes2, boxes1)
+            assert torch.square(loss1 - loss2).mean() < EPS         # commutative
+            assert loss_fn(boxes1, boxes1).square().mean() < EPS    # with itself
 
-    #     focal_loss = FocalLossWithLogits(alpha=2, beta=4)
 
-    #     loss1 = focal_loss(sample_logits, sample_target)
-    #     loss2 = reference_focal_loss(sample_output, sample_target)
-    #     assert torch.abs(loss1 - loss2) < 1e-3
+
+    def test_iou_edge_cases(self):
+        loss_fn = iou_loss.CenterNetIoULoss()
+
+        # full overlap
+        boxes1 = torch.tensor([128,256], dtype=torch.float32)
+        boxes2 = torch.tensor([128,256], dtype=torch.float32)
+        assert loss_fn(boxes1, boxes2) == 0
+
+        # width/height = 0
+        boxes1 = torch.tensor([128,0], dtype=torch.float32)
+        boxes2 = torch.tensor([128,256], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+
+        # very large width/height
+        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
+        boxes2 = torch.tensor([10,20], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+
+    def test_iou_with_torchvision(self):
+        boxes1_wh = torch.rand((10,2))
+        boxes2_wh = torch.rand((10,2))
+        
+        boxes1_xyxy = torch.stack([
+            1 - boxes1_wh[...,0]/2, 1 - boxes1_wh[...,1]/2,
+            1 + boxes1_wh[...,0]/2, 1 + boxes1_wh[...,1]/2
+        ], dim=-1)
+        boxes2_xyxy = torch.stack([
+            1 - boxes2_wh[...,0]/2, 1 - boxes2_wh[...,1]/2,
+            1 + boxes2_wh[...,0]/2, 1 + boxes2_wh[...,1]/2
+        ], dim=-1)
+
+        loss1 = iou_loss.CenterNetIoULoss(keepdim=False)(boxes1_wh, boxes2_wh)
+        loss2 = 1 - box_iou(boxes1_xyxy, boxes2_xyxy).diagonal()
+        assert torch.square(loss1 - loss2).mean() < EPS
+
+    def test_giou_edge_cases(self):
+        loss_fn = iou_loss.CenterNetGIoULoss()
+  
+        # full overlap
+        boxes1 = torch.tensor([128,256], dtype=torch.float32)
+        boxes2 = torch.tensor([128,256], dtype=torch.float32)
+        assert loss_fn(boxes1, boxes2) == 0
+
+        # width/height = 0
+        boxes1 = torch.tensor([128,0], dtype=torch.float32)
+        boxes2 = torch.tensor([128,256], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+
+        # very large width/height
+        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
+        boxes2 = torch.tensor([10,20], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+
+        # enclosed box >> union box
+        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
+        boxes2 = torch.tensor([1e8,20], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 2) < EPS
+    
+    def test_giou_with_torchvision(self):
+        boxes1_wh = torch.rand((10,2))
+        boxes2_wh = torch.rand((10,2))
+        
+        boxes1_xyxy = torch.stack([
+            -boxes1_wh[...,0]/2 + 1, -boxes1_wh[...,1]/2 + 1,
+            boxes1_wh[...,0]/2 + 1, boxes1_wh[...,1]/2 + 1
+        ], dim=-1)
+        boxes2_xyxy = torch.stack([
+            -boxes2_wh[...,0]/2 + 1, -boxes2_wh[...,1]/2 + 1,
+            boxes2_wh[...,0]/2 + 1, boxes2_wh[...,1]/2 + 1
+        ], dim=-1)
+
+        loss1 = iou_loss.CenterNetGIoULoss(keepdim=False)(boxes1_wh, boxes2_wh)
+        loss2 = 1 - generalized_box_iou(boxes1_xyxy, boxes2_xyxy).diagonal()
+        assert torch.square(loss1 - loss2).mean() < EPS

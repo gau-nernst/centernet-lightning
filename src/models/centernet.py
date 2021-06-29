@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
 from ..backbones import build_backbone
-from ..losses import ModifiedFocalLossWithLogits
+from ..losses import focal_loss, iou_loss
 from ..datasets import InferenceDataset
 from ..utils import convert_cxcywh_to_xywh
 from ..eval import detections_to_coco_results
@@ -22,6 +22,14 @@ _supported_heads = ["size", "offset"]
 _output_head_channels = {
     "size": 2,
     "offset": 2
+}
+_supported_losses = {
+    "modified_focal": focal_loss.ModifiedFocalLossWithLogits,
+    "quality_focal": focal_loss.QualityFocalLossWithLogits,
+    "l1": nn.L1Loss,
+    "smooth_l1": nn.SmoothL1Loss,
+    "iou": iou_loss.CenterNetIoULoss,
+    "giou": iou_loss.CenterNetGIoULoss
 }
 
 def _make_output_head(in_channels: int, hidden_channels: int, out_channels: int, fill_bias: float = None):
@@ -64,14 +72,15 @@ class CenterNet(pl.LightningModule):
             num_classes,
             fill_bias=fill_bias["heatmap"]
         )
-        self.head_loss_fn["heatmap"] = ModifiedFocalLossWithLogits(alpha=2., beta=4., reduction="sum")       # focal loss for heatmap
+        # self.head_loss_fn["heatmap"] = ModifiedFocalLossWithLogits(alpha=2., beta=4., reduction="sum")       # focal loss for heatmap
+        self.head_loss_fn["heatmap"] = _supported_losses[loss_functions["heatmap"]](reduction="sum")
         assert "heatmap" in loss_weights
 
         for h in other_heads:
             assert h in _supported_heads
             assert h in loss_weights
             assert h in loss_functions
-            head = _make_output_head(
+            self.output_heads[h] = _make_output_head(
                 backbone_channels,
                 backbone_channels,
                 _output_head_channels[h],
@@ -80,9 +89,7 @@ class CenterNet(pl.LightningModule):
             # loss for size and offset head should be either L1Loss or SmoothL1Loss
             # cornernet uses smooth l1 loss, centernet uses l1 loss
             # NOTE: centernet author noted that l1 loss is better than smooth l1 loss
-            loss_fn = nn.__dict__[loss_functions[h]](reduction="none")    # don't use reduction to apply mask later
-            self.output_heads[h] = head
-            self.head_loss_fn[h] = loss_fn
+            self.head_loss_fn[h] = _supported_losses[loss_functions[h]](reduction="none")    # don't use reduction to apply mask later
         
         self.other_heads  = other_heads
         self.loss_weights = loss_weights   

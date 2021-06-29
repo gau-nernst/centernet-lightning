@@ -2,6 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+__all__ = ["ModifiedFocalLossWithLogits", "QualityFocalLossWithLogits"]
+
 class ModifiedFocalLossWithLogits(nn.Module):
     """Implement Modified Focal Loss (from CornerNet) with Logits to improve numerical stability via logsigmoid. Default values are from the original paper.
 
