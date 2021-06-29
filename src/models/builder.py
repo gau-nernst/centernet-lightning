@@ -1,8 +1,8 @@
 from typing import Union, Dict
 import os
-import yaml
 
 from .centernet import CenterNet
+from ..utils import load_config
 
 def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
     """Build CenterNet from a confile file.
@@ -12,9 +12,8 @@ def build_centernet_from_cfg(cfg_file: Union[str, Dict]):
     """
     if type(cfg_file) == str:
         assert os.path.exists(cfg_file), "Config file does not exist"
-        with open(cfg_file, "r", encoding="utf-8") as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
-            params = config["model"]
+        config = load_config(cfg_file)
+        params = config["model"]
 
     else:
         params = cfg_file

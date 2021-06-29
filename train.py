@@ -23,8 +23,6 @@ def train(config: Union[str, Dict]):
     # load config file
     if type(config) == str:
         assert os.path.exists(config), f"{config} does not exist"
-        # with open(config, "r") as f:
-        #     config = yaml.load(f, Loader=yaml.FullLoader)
         config = load_config(config)
 
     # build model and dataset
