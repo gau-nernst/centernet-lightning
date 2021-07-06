@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 
@@ -33,6 +35,8 @@ class CenterNetIoULoss(nn.Module):
         return loss
 
 class CenterNetGIoULoss(nn.Module):
+    # https://arxiv.org/abs/1902.09630
+
     def __init__(self, reduction="none", keepdim=True):
         super().__init__()
         assert reduction in ("none", "sum", "mean")
@@ -51,6 +55,40 @@ class CenterNetGIoULoss(nn.Module):
 
         giou = intersection / (union + eps) - (enclosed - union) / (enclosed + eps)
         loss = 1 - giou
+
+        if self.reduction == "sum":
+            return torch.sum(loss)
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        if self.keepdim:
+            return loss.unsqueeze(-1)
+        return loss
+
+class CenterNetCIoULoss(nn.Module):
+    # https://arxiv.org/abs/1911.08287
+
+    def __init__(self, reduction="none", keepdim=True):
+        super().__init__()
+        assert reduction in ("none", "sum", "mean")
+        self.reduction = reduction
+        self.keepdim = keepdim      # keepdim is to comply dimension with L1 loss
+
+    def forward(self, boxes1: torch.Tensor, boxes2: torch.Tensor, eps=1e-8):
+        w1 = boxes1[...,0]
+        h1 = boxes1[...,1]
+        w2 = boxes2[...,0]
+        h2 = boxes2[...,1]
+
+        intersection = torch.minimum(w1, w2) * torch.minimum(h1, h2)    # I = min(w1, w2) * min(h1, h2)
+        union = w1*h1 + w2*h2 - intersection                            # U = w1h1 + w2h2 - I
+        iou = intersection / (union + eps)
+
+        # 2 / pi is the normalize factor (90 degree)
+        angle_diff = (torch.atan(w1/(h1+eps)) - torch.atan(w2/(h2+eps))) * 2 / math.pi
+        v = angle_diff.square()
+        alpha = v / (1 - iou + v + eps)
+
+        loss = 1 - iou + alpha * v
 
         if self.reduction == "sum":
             return torch.sum(loss)

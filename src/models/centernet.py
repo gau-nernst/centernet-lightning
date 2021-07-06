@@ -29,7 +29,8 @@ _supported_losses = {
     "l1": nn.L1Loss,
     "smooth_l1": nn.SmoothL1Loss,
     "iou": iou_loss.CenterNetIoULoss,
-    "giou": iou_loss.CenterNetGIoULoss
+    "giou": iou_loss.CenterNetGIoULoss,
+    "ciou": iou_loss.CenterNetCIoULoss
 }
 
 def _make_output_head(in_channels: int, hidden_channels: int, out_channels: int, fill_bias: float = None):
@@ -72,14 +73,16 @@ class CenterNet(pl.LightningModule):
             num_classes,
             fill_bias=fill_bias["heatmap"]
         )
-        # self.head_loss_fn["heatmap"] = ModifiedFocalLossWithLogits(alpha=2., beta=4., reduction="sum")       # focal loss for heatmap
-        self.head_loss_fn["heatmap"] = _supported_losses[loss_functions["heatmap"]](reduction="sum")
+        if "heatmap" not in loss_functions or loss_functions["heatmap"] not in _supported_losses:
+            warnings.warn("Loss function for heatmap was not specified or invalid. Default to Modified Focal Loss (cornernet)")
+            self.head_loss_fn["heatmap"] = focal_loss.ModifiedFocalLossWithLogits(reduction="sum")
+        else:
+            self.head_loss_fn["heatmap"] = _supported_losses[loss_functions["heatmap"]](reduction="sum")
         assert "heatmap" in loss_weights
 
         for h in other_heads:
             assert h in _supported_heads
             assert h in loss_weights
-            assert h in loss_functions
             self.output_heads[h] = _make_output_head(
                 backbone_channels,
                 backbone_channels,
@@ -89,7 +92,11 @@ class CenterNet(pl.LightningModule):
             # loss for size and offset head should be either L1Loss or SmoothL1Loss
             # cornernet uses smooth l1 loss, centernet uses l1 loss
             # NOTE: centernet author noted that l1 loss is better than smooth l1 loss
-            self.head_loss_fn[h] = _supported_losses[loss_functions[h]](reduction="none")    # don't use reduction to apply mask later
+            if h not in loss_functions or loss_functions[h] not in _supported_losses:
+                warnings.warn(f"Loss function for {h} was not specified or invalid. Default to L1 Loss")
+                self.head_loss_fn[h] = nn.L1Loss(reduction="none")
+            else:
+                self.head_loss_fn[h] = _supported_losses[loss_functions.get(h, "l1")](reduction="none")    # don't use reduction to apply mask later
         
         self.other_heads  = other_heads
         self.loss_weights = loss_weights   
@@ -351,10 +358,10 @@ class CenterNet(pl.LightningModule):
         }
         return return_dict
 
-class CenterNetDetectionTorchScript(nn.Module):
+class CenterNetDetection(nn.Module):
     def __init__(self, backbone: Dict, num_classes: int, **kwargs):
         super().__init__()
-        self.backbone = build_backbone(**backbone)        
+        self.backbone = build_backbone(**backbone)
         backbone_channels = self.backbone.out_channels
 
         self.output_heatmap = _make_output_head(backbone_channels, backbone_channels, num_classes)

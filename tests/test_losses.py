@@ -33,7 +33,7 @@ class TestFocalLosses:
 
 class TestIoULosses:
     def test_basic(self):
-        for LossFn in (iou_loss.CenterNetIoULoss, iou_loss.CenterNetGIoULoss):
+        for LossFn in (iou_loss.CenterNetIoULoss, iou_loss.CenterNetGIoULoss, iou_loss.CenterNetCIoULoss):
             loss_fn = LossFn(keepdim=False)
             # random samples
             boxes1 = torch.rand((4,10,2))
@@ -46,8 +46,6 @@ class TestIoULosses:
             assert torch.square(loss1 - loss2).mean() < EPS         # commutative
             assert loss_fn(boxes1, boxes1).square().mean() < EPS    # with itself
 
-
-
     def test_iou_edge_cases(self):
         loss_fn = iou_loss.CenterNetIoULoss()
 
@@ -57,14 +55,18 @@ class TestIoULosses:
         assert loss_fn(boxes1, boxes2) == 0
 
         # width/height = 0
-        boxes1 = torch.tensor([128,0], dtype=torch.float32)
-        boxes2 = torch.tensor([128,256], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        boxes1 = torch.tensor([128,256], dtype=torch.float32)
+        for i in range(2):
+            boxes2 = torch.tensor([128,256], dtype=torch.float32)
+            boxes2[i] = 0
+            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
 
         # very large width/height
-        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
-        boxes2 = torch.tensor([10,20], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        boxes1 = torch.tensor([10,20], dtype=torch.float32)
+        for i in range(2):
+            boxes2 = torch.tensor([10,20], dtype=torch.float32)
+            boxes2[i] = 1e8
+            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
 
     def test_iou_with_torchvision(self):
         boxes1_wh = torch.rand((10,2))
@@ -92,14 +94,18 @@ class TestIoULosses:
         assert loss_fn(boxes1, boxes2) == 0
 
         # width/height = 0
-        boxes1 = torch.tensor([128,0], dtype=torch.float32)
-        boxes2 = torch.tensor([128,256], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        boxes1 = torch.tensor([128,256], dtype=torch.float32)
+        for i in range(2):
+            boxes2 = torch.tensor([128,256], dtype=torch.float32)
+            boxes2[i] = 0
+            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
 
         # very large width/height
-        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
-        boxes2 = torch.tensor([10,20], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        boxes1 = torch.tensor([10,20], dtype=torch.float32)
+        for i in range(2):
+            boxes2 = torch.tensor([10,20], dtype=torch.float32)
+            boxes2[i] = 1e8
+            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
 
         # enclosed box >> union box
         boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
@@ -122,3 +128,26 @@ class TestIoULosses:
         loss1 = iou_loss.CenterNetGIoULoss(keepdim=False)(boxes1_wh, boxes2_wh)
         loss2 = 1 - generalized_box_iou(boxes1_xyxy, boxes2_xyxy).diagonal()
         assert torch.square(loss1 - loss2).mean() < EPS
+
+    def test_ciou_edge_cases(self):
+        loss_fn = iou_loss.CenterNetCIoULoss()
+  
+        # full overlap, same ratio
+        boxes1 = torch.tensor([128,256], dtype=torch.float32)
+        boxes2 = torch.tensor([128,256], dtype=torch.float32)
+        assert loss_fn(boxes1, boxes2) == 0
+
+        # width = 0
+        boxes1 = torch.tensor([0,128], dtype=torch.float32)
+        boxes2 = torch.tensor([128,128], dtype=torch.float32)
+        assert torch.abs(loss_fn(boxes1, boxes2) - 1.05) < EPS
+
+        # # very large width/height
+        # boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
+        # boxes2 = torch.tensor([10,20], dtype=torch.float32)
+        # assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+
+        # # enclosed box >> union box
+        # boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
+        # boxes2 = torch.tensor([1e8,20], dtype=torch.float32)
+        # assert torch.abs(loss_fn(boxes1, boxes2) - 2) < EPS

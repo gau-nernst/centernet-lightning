@@ -56,10 +56,10 @@ class QualityFocalLossWithLogits(nn.Module):
         self.beta = beta
         self.reduction = reduction
 
-    def __format__(self, inputs: torch.Tensor, targets: torch.Tensor):
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor):
         probs = torch.sigmoid(inputs)
 
-        ce_loss = F.binary_cross_entropy(inputs, targets, reduction="none")
+        ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
         modulating_factor = torch.abs(targets - probs)**self.beta
 
         loss = modulating_factor * ce_loss
