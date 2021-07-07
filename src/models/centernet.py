@@ -10,7 +10,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
-from ..backbones import build_backbone
+from builder import build_backbone, build_neck, build_output_heads
 from ..losses import focal_loss, iou_loss
 from ..datasets import InferenceDataset
 from ..utils import convert_cxcywh_to_xywh
@@ -18,13 +18,14 @@ from ..eval import detections_to_coco_results
 
 __all__ = ["CenterNet"]
 
+
 _supported_heads = ["size", "offset"]
 _output_head_channels = {
     "size": 2,
     "offset": 2
 }
 _supported_losses = {
-    "modified_focal": focal_loss.ModifiedFocalLossWithLogits,
+    "modified_focal": focal_loss.CornerNetFocalLossWithLogits,
     "quality_focal": focal_loss.QualityFocalLossWithLogits,
     "l1": nn.L1Loss,
     "smooth_l1": nn.SmoothL1Loss,
@@ -33,84 +34,31 @@ _supported_losses = {
     "ciou": iou_loss.CenterNetCIoULoss
 }
 
-def _make_output_head(in_channels: int, hidden_channels: int, out_channels: int, fill_bias: float = None):
-    # Reference implementations
-    # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
-    # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
-    conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1)
-    relu = nn.ReLU(inplace=True)
-    conv2 = nn.Conv2d(hidden_channels, out_channels, 1)
-
-    if fill_bias is not None:
-        conv2.bias.data.fill_(fill_bias)
-
-    output_head = nn.Sequential(conv1, relu, conv2)
-    return output_head
-
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
     """
-    def __init__(self, backbone: Dict, num_classes: int, output_heads: Dict = None, optimizer: Dict = None, lr_scheduler: Dict = None, **kwargs):
-        super(CenterNet, self).__init__()
+    def __init__(self, backbone: Dict, neck: Dict, output_heads: Dict, task: str, optimizer: Dict = None, lr_scheduler: Dict = None, **kwargs):
+        super().__init__()
 
-        self.backbone = build_backbone(**backbone)        
+        return_features = True if neck["name"] in ("fpn") else False
+        self.backbone = build_backbone(**backbone, return_features=return_features)
+        self.neck = build_neck(**neck, self.backbone.out_channels)
+        self.output_heads = build_output_heads(**output_heads, self.neck.out_channels)
+
         backbone_channels = self.backbone.out_channels
         self.output_stride = self.backbone.output_stride    # how much input image is downsampled
-        
-        self.num_classes = num_classes
-
-        fill_bias = output_heads["fill_bias"]
-        other_heads = output_heads["other_heads"]
-        loss_weights = output_heads["loss_weights"]
-        loss_functions = output_heads["loss_functions"]
-
-        # create output heads and set their losses
-        self.output_heads = nn.ModuleDict()
-        self.head_loss_fn = nn.ModuleDict()
-        self.output_heads["heatmap"] = _make_output_head(
-            backbone_channels,
-            backbone_channels,
-            num_classes,
-            fill_bias=fill_bias["heatmap"]
-        )
-        if "heatmap" not in loss_functions or loss_functions["heatmap"] not in _supported_losses:
-            warnings.warn("Loss function for heatmap was not specified or invalid. Default to Modified Focal Loss (cornernet)")
-            self.head_loss_fn["heatmap"] = focal_loss.ModifiedFocalLossWithLogits(reduction="sum")
-        else:
-            self.head_loss_fn["heatmap"] = _supported_losses[loss_functions["heatmap"]](reduction="sum")
-        assert "heatmap" in loss_weights
-
-        for h in other_heads:
-            assert h in _supported_heads
-            assert h in loss_weights
-            self.output_heads[h] = _make_output_head(
-                backbone_channels,
-                backbone_channels,
-                _output_head_channels[h],
-                fill_bias=fill_bias[h]
-            )
-            # loss for size and offset head should be either L1Loss or SmoothL1Loss
-            # cornernet uses smooth l1 loss, centernet uses l1 loss
-            # NOTE: centernet author noted that l1 loss is better than smooth l1 loss
-            if h not in loss_functions or loss_functions[h] not in _supported_losses:
-                warnings.warn(f"Loss function for {h} was not specified or invalid. Default to L1 Loss")
-                self.head_loss_fn[h] = nn.L1Loss(reduction="none")
-            else:
-                self.head_loss_fn[h] = _supported_losses[loss_functions.get(h, "l1")](reduction="none")    # don't use reduction to apply mask later
-        
-        self.other_heads  = other_heads
-        self.loss_weights = loss_weights   
         
         self.optimizer_cfg    = optimizer
         self.lr_scheduler_cfg = lr_scheduler
 
         self.save_hyperparameters()
-        self._steps_per_epoch = None        # for steps_per_epoch property
+        # self._steps_per_epoch = None        # for steps_per_epoch property
 
-    def forward(self, images):
+    def forward(self, x):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections.
         """
-        features = self.backbone(images)
+        features = self.backbone(x)
+        features = self.neck(features)
         output = {}
         output["backbone_features"] = features      # for logging purpose
         
@@ -310,14 +258,15 @@ class CenterNet(pl.LightningModule):
         
         return self._steps_per_epoch
 
-    def log_histogram(self, name: str, values: torch.Tensor):
-        flatten_values = values.detach().view(-1).cpu().float().numpy()
+    def log_histogram(self, name: str, values: torch.Tensor, freq=100):
+        if self.trainer.global_step % freq == 0:
+            flatten_values = values.detach().view(-1).cpu().float().numpy()
 
-        if isinstance(self.logger, TensorBoardLogger):
-            self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
-        
-        elif isinstance(self.logger, WandbLogger):
-            self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
+            if isinstance(self.logger, TensorBoardLogger):
+                self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
+            
+            elif isinstance(self.logger, WandbLogger):
+                self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def register_optimizer(self, optimizer_cfg: Dict):
         self.optimizer_cfg = optimizer_cfg

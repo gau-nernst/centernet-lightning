@@ -1,33 +1,34 @@
 model:
+  task: detection
   backbone:
     name: resnet34
-    upsample_channels: [256, 128, 64]
-    conv_upsample_block:
+    pretrained: True
+    input_channels: 3
+
+  neck:
+    name: simple    # simple or fpn
+    params:
+      upsample_channels: [256, 128, 64]
       upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
       conv_type: normal                 # normal, separable, dcn
-      deconv_kernel: 4                  # only used with conv_transpose
-      init_bilinear: True               # only used with conv_transpose
-  
-    skip_connection:
-      kernel_size: 3
-      padding: 1
-
-  num_classes: 2
-  heatmap_method: ttfnet       # cornernet or ttfnet
+      
+      deconv_kernel: 3            # only used with conv_transpose
+      deconv_init_bilinear: True  # only used with conv_transpose
+      
+      skip_kernel: 3    # only used for fpn
 
   output_heads:
-    other_heads: [size, offset]
-    fill_bias: 
-      heatmap: -2.19
-      size: 0
-      offset: 0
-    loss_weights:
-      heatmap: 1
-      size: 0.1
-      offset: 1
-    loss_functions:
-      size: L1Loss      # a loss from torch.nn e.g. L1Loss, SmoothL1Loss
-      offset: L1Loss
+    heatmap:
+      num_classes: 2
+      init_bias: -2.19
+      target_method: cornernet        # cornernet or ttfnet
+      loss_function: cornernet_focal   # cornernet or quality (gfocal)
+      loss_weight: 1
+
+    box_2d:
+      init_bias: 0
+      loss_function: l1       # iou, giou, l1, or smooth_l1
+      loss_weight: 0.1
 
   optimizer:           # mmdetection
     name: SGD          # any optimizers from torch.optim
@@ -90,8 +91,8 @@ trainer:
     benchmark: True
     gradient_clip_val: 35     # mmdetection
 
-  logger:
-    name: wandb         # tensorboard or wandb
-    params:
-      project: helmet
-      log_model: True
+  # logger:
+  #   name: wandb         # tensorboard or wandb
+  #   params:
+  #     project: helmet
+  #     log_model: True
