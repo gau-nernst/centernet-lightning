@@ -3,36 +3,18 @@ import warnings
 
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 
-from builder import build_backbone, build_neck, build_output_heads
-from ..losses import focal_loss, iou_loss
+from .backbones import build_backbone
+from .necks import build_neck
+from .heads import build_output_heads
 from ..datasets import InferenceDataset
-from ..utils import convert_cxcywh_to_xywh
+from ..utils import convert_cxcywh_to_xywh, load_config
 from ..eval import detections_to_coco_results
-
-__all__ = ["CenterNet"]
-
-
-_supported_heads = ["size", "offset"]
-_output_head_channels = {
-    "size": 2,
-    "offset": 2
-}
-_supported_losses = {
-    "modified_focal": focal_loss.CornerNetFocalLossWithLogits,
-    "quality_focal": focal_loss.QualityFocalLossWithLogits,
-    "l1": nn.L1Loss,
-    "smooth_l1": nn.SmoothL1Loss,
-    "iou": iou_loss.CenterNetIoULoss,
-    "giou": iou_loss.CenterNetGIoULoss,
-    "ciou": iou_loss.CenterNetCIoULoss
-}
 
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
@@ -41,18 +23,19 @@ class CenterNet(pl.LightningModule):
         super().__init__()
 
         return_features = True if neck["name"] in ("fpn") else False
-        self.backbone = build_backbone(**backbone, return_features=return_features)
-        self.neck = build_neck(**neck, self.backbone.out_channels)
-        self.output_heads = build_output_heads(**output_heads, self.neck.out_channels)
+        self.backbone = build_backbone(backbone, return_features=return_features)
+        self.neck = build_neck(neck, backbone_channels=self.backbone.out_channels)
+        self.output_heads = build_output_heads(output_heads, in_channels=self.neck.out_channels)
 
-        backbone_channels = self.backbone.out_channels
         self.output_stride = self.backbone.output_stride    # how much input image is downsampled
         
+        self.task = task
         self.optimizer_cfg    = optimizer
         self.lr_scheduler_cfg = lr_scheduler
+        self.num_classes = output_heads["heatmap"]["num_classes"]
 
         self.save_hyperparameters()
-        # self._steps_per_epoch = None        # for steps_per_epoch property
+        self._steps_per_epoch = None
 
     def forward(self, x):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections.
@@ -60,7 +43,7 @@ class CenterNet(pl.LightningModule):
         features = self.backbone(x)
         features = self.neck(features)
         output = {}
-        output["backbone_features"] = features      # for logging purpose
+        output["features"] = features      # for logging purpose
         
         for k, v in self.output_heads.items():
             output[k] = v(features)
@@ -70,54 +53,10 @@ class CenterNet(pl.LightningModule):
     def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
         """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
-        bboxes = targets["bboxes"].clone()
-        target_heatmap = targets["heatmap"]
-        mask = targets["mask"].unsqueeze(-1)    # add column dimension to support broadcasting
-
-        batch_size, _, heatmap_h, heatmap_w = preds["heatmap"].shape
-        pred_heatmap = preds["heatmap"]
-        size_map     = preds["size"].view(batch_size, 2, -1)    # flatten last xy dimensions for torch.gather() later
-        offset_map   = preds["offset"].view(batch_size, 2, -1)
-
-        # initialize losses
-        losses = {}
-
-        # convert normalized coordinates [0,1] to heatmap pixel coordinates [0,128]
-        bboxes[...,[0,2]] *= heatmap_w
-        bboxes[...,[1,3]] *= heatmap_h
-        centers_int = bboxes[...,:2].long()     # convert to integer to use as index
-
-        # combine xy indices for torch.gather()
-        # repeat indices using .expand() to gather on 2 channels
-        xy_indices = centers_int[...,1] * heatmap_w + centers_int[...,0]        # y * w + x
-        xy_indices = xy_indices.unsqueeze(1).expand((batch_size,2,-1))
-
-        pred_sizes  = torch.gather(size_map, dim=-1, index=xy_indices)      # N2D
-        pred_offset = torch.gather(offset_map, dim=-1, index=xy_indices)    # N2D
-
-        # need to swapaxes since pred_size is N2D but true_wh is ND2
-        target_size = bboxes[...,2:] * self.output_stride           # convert to original image pixel coordinate
-        size_loss = self.head_loss_fn["size"](pred_sizes.swapaxes(1,2), target_size)
-        size_loss = torch.sum(size_loss * mask)
-        losses["size"] = size_loss
-
-        target_offset = bboxes[...,:2] - torch.floor(bboxes[...,:2])    # quantization error
-        offset_loss = self.head_loss_fn["offset"](pred_offset.swapaxes(1,2), target_offset)
-        offset_loss = torch.sum(offset_loss * mask)
-        losses["offset"] = offset_loss
-
-        losses["heatmap"] = self.head_loss_fn["heatmap"](pred_heatmap, target_heatmap)
-
-        # average over number of detections
-        N = torch.sum(mask) + eps
-        losses["size"] /= N
-        losses["offset"] /= N
-        losses["heatmap"] /= N
-
-        total_loss = torch.tensor(0., dtype=losses["heatmap"].dtype, device=self.device)
-        for k,v in losses.items():
-            total_loss += v * self.loss_weights[k]
-        losses["total"] = total_loss
+        losses = {"total": torch.tensor(0., device=self.device)}
+        for name, head in self.output_heads.items():
+            losses[name] = head.compute_loss(preds, targets, eps=eps)
+            losses["total"] += losses[name] * head.loss_weight
 
         return losses
 
@@ -192,11 +131,10 @@ class CenterNet(pl.LightningModule):
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
 
-        self.log("epoch_frac", self.global_step / self.steps_per_epoch)     # log this to view graph with epoch as x-axis
+        self.log("epoch_frac", self.global_step / self.get_steps_per_epoch())     # log this to view graph with epoch as x-axis
 
         self.log_histogram("output_values/heatmap", encoded_outputs["heatmap"])
-        self.log_histogram("output_values/size", encoded_outputs["size"])
-        self.log_histogram("output_values/offset", encoded_outputs["offset"])
+        self.log_histogram("output_values/box_2d", encoded_outputs["box_2d"])
 
         return losses["total"]
 
@@ -247,8 +185,7 @@ class CenterNet(pl.LightningModule):
 
         return all_detections
 
-    @property
-    def steps_per_epoch(self):
+    def get_steps_per_epoch(self):
         # does not consider multi-gpu training
         if self.trainer.max_steps:
             return self.trainer.max_steps
@@ -292,7 +229,7 @@ class CenterNet(pl.LightningModule):
         # - support for multiple lr schedulers
         lr_scheduler_algo = torch.optim.lr_scheduler.__dict__[self.lr_scheduler_cfg["name"]]
         if self.lr_scheduler_cfg["name"] in ("OneCycleLR"):
-            lr_scheduler = lr_scheduler_algo(optimizer, epochs=self.trainer.max_epochs, steps_per_epoch=self.steps_per_epoch, **self.lr_scheduler_cfg["params"])
+            lr_scheduler = lr_scheduler_algo(optimizer, epochs=self.trainer.max_epochs, steps_per_epoch=self.get_steps_per_epoch(), **self.lr_scheduler_cfg["params"])
         else:
             lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
 
@@ -307,41 +244,50 @@ class CenterNet(pl.LightningModule):
         }
         return return_dict
 
-class CenterNetDetection(nn.Module):
-    def __init__(self, backbone: Dict, num_classes: int, **kwargs):
-        super().__init__()
-        self.backbone = build_backbone(**backbone)
-        backbone_channels = self.backbone.out_channels
+def build_centernet(config):
+    if isinstance(config, str):
+        config = load_config(config)
+        config = config["model"]
 
-        self.output_heatmap = _make_output_head(backbone_channels, backbone_channels, num_classes)
-        self.output_size = _make_output_head(backbone_channels, backbone_channels, 2)
-        self.output_offset = _make_output_head(backbone_channels, backbone_channels, 2)
+    model = CenterNet(**config)
+    return model
+
+
+# class CenterNetDetection(nn.Module):
+#     def __init__(self, backbone: Dict, num_classes: int, **kwargs):
+#         super().__init__()
+#         self.backbone = build_backbone(**backbone)
+#         backbone_channels = self.backbone.out_channels
+
+#         self.output_heatmap = _make_output_head(backbone_channels, backbone_channels, num_classes)
+#         self.output_size = _make_output_head(backbone_channels, backbone_channels, 2)
+#         self.output_offset = _make_output_head(backbone_channels, backbone_channels, 2)
     
-    @classmethod
-    def load_centernet_from_checkpoint(cls, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        hparams = checkpoint["hyper_parameters"]
-        state_dict = checkpoint["state_dict"]
+#     @classmethod
+#     def load_centernet_from_checkpoint(cls, checkpoint_path):
+#         checkpoint = torch.load(checkpoint_path)
+#         hparams = checkpoint["hyper_parameters"]
+#         state_dict = checkpoint["state_dict"]
 
-        model = cls(**hparams)
+#         model = cls(**hparams)
 
-        output_weights = [x for x in state_dict.keys() if x.startswith("output_heads.")]
-        remove_length = len("output_heads.")
+#         output_weights = [x for x in state_dict.keys() if x.startswith("output_heads.")]
+#         remove_length = len("output_heads.")
 
-        for old_key in output_weights:
-            new_key = "output_" + old_key[remove_length:]
-            state_dict[new_key] = state_dict[old_key]
-            del state_dict[old_key]
+#         for old_key in output_weights:
+#             new_key = "output_" + old_key[remove_length:]
+#             state_dict[new_key] = state_dict[old_key]
+#             del state_dict[old_key]
 
-        model.load_state_dict(state_dict)
-        return model
+#         model.load_state_dict(state_dict)
+#         return model
 
-    def forward(self, images):
-        features = self.backbone(images)
+#     def forward(self, images):
+#         features = self.backbone(images)
 
-        heatmap = self.output_heatmap(features)
-        heatmap = torch.sigmoid(heatmap)
-        size = self.output_size(features)
-        offset = self.output_offset(features)
+#         heatmap = self.output_heatmap(features)
+#         heatmap = torch.sigmoid(heatmap)
+#         size = self.output_size(features)
+#         offset = self.output_offset(features)
 
-        return heatmap, size, offset
+#         return heatmap, size, offset
