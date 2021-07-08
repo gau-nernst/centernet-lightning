@@ -1,153 +1,107 @@
 import torch
 from torchvision.ops import box_iou, generalized_box_iou
 
-from src.losses import focal_loss, iou_loss
+from src.losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
+from src.losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
 
 EPS = 1e-6
 
-class TestFocalLosses:
-    def test_modified_focal_loss(self):
-        loss = focal_loss.ModifiedFocalLossWithLogits()
+boxes1 = torch.zeros((4,10,4))
+boxes1[...,:2] = torch.rand((4,10,2))
+boxes1[...,2:] = boxes1[...,:2] + torch.rand(4,10,2)
+
+boxes2 = torch.zeros((4,10,4))
+boxes2[...,:2] = torch.rand((4,10,2))
+boxes2[...,2:] = boxes2[...,:2] + torch.rand(4,10,2)
+
+class TestFocalLoss:
+    def test_cornernet_focal_loss(self):
+        loss = CornerNetFocalLossWithLogits()
         # some points y = 1
         # all y = 1
         # all y = 0
         pass
 
-    def test_modified_focal_loss_stability(self):
-        loss = focal_loss.ModifiedFocalLossWithLogits()
+    def test_cornernet_focal_loss_stability(self):
+        loss = CornerNetFocalLossWithLogits()
         # very negative inputs
         # very small inputs
         # very positive inputs
         pass
 
     def test_quality_focal_loss(self):
-        loss = focal_loss.QualityFocalLossWithLogits()
+        loss = QualityFocalLossWithLogits()
         pass
 
     def test_quality_focal_loss_stability(self):
-        loss = focal_loss.QualityFocalLossWithLogits()
+        loss = QualityFocalLossWithLogits()
         # very negative inputs
         # very small inputs
         # very positive inputs
         pass
 
-class TestIoULosses:
+class TestIoULoss:
     def test_basic(self):
-        for LossFn in (iou_loss.CenterNetIoULoss, iou_loss.CenterNetGIoULoss, iou_loss.CenterNetCIoULoss):
-            loss_fn = LossFn(keepdim=False)
-            # random samples
-            boxes1 = torch.rand((4,10,2))
-            boxes2 = torch.rand((4,10,2))
-            
-            assert LossFn()(boxes1, boxes2).shape == (4,10,1)       # correct shape
-            assert loss_fn(boxes1, boxes2).shape == (4,10)          # correct shape
+        for LossFn in (IoULoss, GIoULoss, DIoULoss, CIoULoss):
+            print(LossFn)
+            loss_fn = LossFn()
+
+            # correct shape
+            assert LossFn(keepdim=True)(boxes1, boxes2).shape == (4,10,1)
+            assert LossFn(keepdim=False)(boxes1, boxes2).shape == (4,10)
+                        
+            # commutative
             loss1 = loss_fn(boxes1, boxes2)
             loss2 = loss_fn(boxes2, boxes1)
-            assert torch.square(loss1 - loss2).mean() < EPS         # commutative
-            assert loss_fn(boxes1, boxes1).square().mean() < EPS    # with itself
+            assert (loss1 - loss2).abs().mean() < EPS
+            
+            # with itself
+            loss = loss_fn(boxes1, boxes1)
+            assert loss.abs().mean() < EPS
 
-    def test_iou_edge_cases(self):
-        loss_fn = iou_loss.CenterNetIoULoss()
+    def test_iou(self):
+        loss_fn = IoULoss()
 
         # full overlap
-        boxes1 = torch.tensor([128,256], dtype=torch.float32)
-        boxes2 = torch.tensor([128,256], dtype=torch.float32)
-        assert loss_fn(boxes1, boxes2) == 0
+        box1 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        box2 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        assert loss_fn(box1, box2) == 0
 
-        # width/height = 0
-        boxes1 = torch.tensor([128,256], dtype=torch.float32)
-        for i in range(2):
-            boxes2 = torch.tensor([128,256], dtype=torch.float32)
-            boxes2[i] = 0
-            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        # no overlap
+        box1 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        box2 = torch.tensor([130,230,140,270], dtype=torch.float32)
+        assert loss_fn(box1, box2) == 1
 
-        # very large width/height
-        boxes1 = torch.tensor([10,20], dtype=torch.float32)
-        for i in range(2):
-            boxes2 = torch.tensor([10,20], dtype=torch.float32)
-            boxes2[i] = 1e8
-            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        # small box inside large box
+        box1 = torch.tensor([10,10,11,11], dtype=torch.float32)
+        box2 = torch.tensor([0,0,100,100])
+        assert loss_fn(box1, box2) == 1 - 1/10000
 
-    def test_iou_with_torchvision(self):
-        boxes1_wh = torch.rand((10,2))
-        boxes2_wh = torch.rand((10,2))
-        
-        boxes1_xyxy = torch.stack([
-            1 - boxes1_wh[...,0]/2, 1 - boxes1_wh[...,1]/2,
-            1 + boxes1_wh[...,0]/2, 1 + boxes1_wh[...,1]/2
-        ], dim=-1)
-        boxes2_xyxy = torch.stack([
-            1 - boxes2_wh[...,0]/2, 1 - boxes2_wh[...,1]/2,
-            1 + boxes2_wh[...,0]/2, 1 + boxes2_wh[...,1]/2
-        ], dim=-1)
+        # test with torchvision
+        loss1 = loss_fn(boxes1[0], boxes2[0]).squeeze(-1)
+        loss2 = 1 - box_iou(boxes1[0], boxes2[0]).diagonal()
+        assert (loss1 - loss2).abs().mean() < EPS
 
-        loss1 = iou_loss.CenterNetIoULoss(keepdim=False)(boxes1_wh, boxes2_wh)
-        loss2 = 1 - box_iou(boxes1_xyxy, boxes2_xyxy).diagonal()
-        assert torch.square(loss1 - loss2).mean() < EPS
-
-    def test_giou_edge_cases(self):
-        loss_fn = iou_loss.CenterNetGIoULoss()
+    def test_giou(self):
+        loss_fn = GIoULoss()
   
         # full overlap
-        boxes1 = torch.tensor([128,256], dtype=torch.float32)
-        boxes2 = torch.tensor([128,256], dtype=torch.float32)
-        assert loss_fn(boxes1, boxes2) == 0
+        box1 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        box2 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        assert loss_fn(box1, box2) == 0
 
-        # width/height = 0
-        boxes1 = torch.tensor([128,256], dtype=torch.float32)
-        for i in range(2):
-            boxes2 = torch.tensor([128,256], dtype=torch.float32)
-            boxes2[i] = 0
-            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
-
-        # very large width/height
-        boxes1 = torch.tensor([10,20], dtype=torch.float32)
-        for i in range(2):
-            boxes2 = torch.tensor([10,20], dtype=torch.float32)
-            boxes2[i] = 1e8
-            assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
+        # no overlap
+        box1 = torch.tensor([10,20,128,256], dtype=torch.float32)
+        box2 = torch.tensor([130,230,140,270], dtype=torch.float32)
+        assert loss_fn(box1, box2) > 1
 
         # enclosed box >> union box
-        boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
-        boxes2 = torch.tensor([1e8,20], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 2) < EPS
+        box1 = torch.tensor([0,0,1,100], dtype=torch.float32)
+        box2 = torch.tensor([0,0,100,1], dtype=torch.float32)
+        expected = 1 - (1/199 - 1 + 199/10000)
+        assert (loss_fn(box1, box2) - expected).abs() < EPS
     
-    def test_giou_with_torchvision(self):
-        boxes1_wh = torch.rand((10,2))
-        boxes2_wh = torch.rand((10,2))
-        
-        boxes1_xyxy = torch.stack([
-            -boxes1_wh[...,0]/2 + 1, -boxes1_wh[...,1]/2 + 1,
-            boxes1_wh[...,0]/2 + 1, boxes1_wh[...,1]/2 + 1
-        ], dim=-1)
-        boxes2_xyxy = torch.stack([
-            -boxes2_wh[...,0]/2 + 1, -boxes2_wh[...,1]/2 + 1,
-            boxes2_wh[...,0]/2 + 1, boxes2_wh[...,1]/2 + 1
-        ], dim=-1)
-
-        loss1 = iou_loss.CenterNetGIoULoss(keepdim=False)(boxes1_wh, boxes2_wh)
-        loss2 = 1 - generalized_box_iou(boxes1_xyxy, boxes2_xyxy).diagonal()
-        assert torch.square(loss1 - loss2).mean() < EPS
-
-    def test_ciou_edge_cases(self):
-        loss_fn = iou_loss.CenterNetCIoULoss()
-  
-        # full overlap, same ratio
-        boxes1 = torch.tensor([128,256], dtype=torch.float32)
-        boxes2 = torch.tensor([128,256], dtype=torch.float32)
-        assert loss_fn(boxes1, boxes2) == 0
-
-        # width = 0
-        boxes1 = torch.tensor([0,128], dtype=torch.float32)
-        boxes2 = torch.tensor([128,128], dtype=torch.float32)
-        assert torch.abs(loss_fn(boxes1, boxes2) - 1.05) < EPS
-
-        # # very large width/height
-        # boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
-        # boxes2 = torch.tensor([10,20], dtype=torch.float32)
-        # assert torch.abs(loss_fn(boxes1, boxes2) - 1) < EPS
-
-        # # enclosed box >> union box
-        # boxes1 = torch.tensor([10,1e8], dtype=torch.float32)
-        # boxes2 = torch.tensor([1e8,20], dtype=torch.float32)
-        # assert torch.abs(loss_fn(boxes1, boxes2) - 2) < EPS
+        # test with torchvision
+        loss1 = loss_fn(boxes1[0], boxes2[0]).squeeze(-1)
+        loss2 = 1 - generalized_box_iou(boxes1[0], boxes2[0]).diagonal()
+        assert (loss1 - loss2).abs().mean() < EPS
