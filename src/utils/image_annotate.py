@@ -182,7 +182,7 @@ class LogImageCallback(pl.Callback):
             convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1], inplace=True)
 
             img = img.unsqueeze(0).to(pl_module.device)
-            encoded_outputs = pl_module(img)
+            encoded_outputs = pl_module.get_encoded_outputs(img)
             pred_detections = pl_module.decode_detections(encoded_outputs)
 
             for k in detections_pred.keys():

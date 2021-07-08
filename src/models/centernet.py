@@ -1,5 +1,6 @@
 from typing import Dict
 import warnings
+from collections import namedtuple
 
 import numpy as np
 import torch
@@ -13,8 +14,12 @@ from .backbones import build_backbone
 from .necks import build_neck
 from .heads import build_output_heads
 from ..datasets import InferenceDataset
-from ..utils import convert_cxcywh_to_xywh, load_config
+from ..utils import load_config
 from ..eval import detections_to_coco_results
+
+_output_templates = {
+    "detection": namedtuple("Detection", "heatmap box_2d")
+}
 
 class CenterNet(pl.LightningModule):
     """General CenterNet model. Build CenterNet from a given backbone and output
@@ -38,7 +43,20 @@ class CenterNet(pl.LightningModule):
         self._steps_per_epoch = None
 
     def forward(self, x):
-        """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections.
+        """Return encoded outputs. Use namedtuple to support TorchScript and ONNX export. Heatmap is after sigmoid
+        """
+        encoded_outputs = self.get_encoded_outputs(x)
+        encoded_outputs["heatmap"] = torch.sigmoid(encoded_outputs["heatmap"])
+
+        # create a namedtuple
+        template = _output_templates[self.task]
+        outputs = {name: encoded_outputs[name] for name in template._fields}
+        outputs = template(**outputs)
+
+        return outputs
+
+    def get_encoded_outputs(self, x):
+        """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
         features = self.backbone(x)
         features = self.neck(features)
@@ -121,7 +139,7 @@ class CenterNet(pl.LightningModule):
 
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
-        encoded_outputs = self(batch["image"])
+        encoded_outputs = self.get_encoded_outputs(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
@@ -134,13 +152,13 @@ class CenterNet(pl.LightningModule):
         return losses["total"]
 
     def validation_step(self, batch, batch_idx):
-        encoded_outputs = self(batch["image"])
+        encoded_outputs = self.get_encoded_outputs(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
 
     def test_step(self, batch, batch_idx):
-        encoded_outputs = self(batch["image"])
+        encoded_outputs = self.get_encoded_outputs(batch["image"])
         detections = self.decode_detections(encoded_outputs)
 
     @torch.no_grad()
@@ -159,7 +177,7 @@ class CenterNet(pl.LightningModule):
             img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
             img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
 
-            encoded_outputs = self(batch["image"].to(self.device))
+            encoded_outputs = self.get_encoded_outputs(batch["image"].to(self.device))
             detections = self.decode_detections(encoded_outputs, num_detections=num_detections, nms_kernel=nms_kernel, normalize_bbox=True)
             detections = {k: v.cpu().float().numpy() for k,v in detections.items()}
 
@@ -172,7 +190,7 @@ class CenterNet(pl.LightningModule):
         all_detections = {k: np.concatenate(v, axis=0) for k,v in all_detections.items()}
         
         if save_path is not None:
-            bboxes = convert_cxcywh_to_xywh(detections["bboxes"]).tolist()
+            bboxes = detections["bboxes"].tolist()
             labels = detections["labels"].tolist()
             scores = detections["scores"].tolist()
 
@@ -191,14 +209,16 @@ class CenterNet(pl.LightningModule):
         return self._steps_per_epoch
 
     def log_histogram(self, name: str, values: torch.Tensor, freq=100):
-        if self.trainer.global_step % freq == 0:
-            flatten_values = values.detach().view(-1).cpu().float().numpy()
+        if (self.trainer.global_step+1) % freq != 0:
+            return
 
-            if isinstance(self.logger, TensorBoardLogger):
-                self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
-            
-            elif isinstance(self.logger, WandbLogger):
-                self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
+        flatten_values = values.detach().view(-1).cpu().float().numpy()
+
+        if isinstance(self.logger, TensorBoardLogger):
+            self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
+        
+        elif isinstance(self.logger, WandbLogger):
+            self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def register_optimizer(self, optimizer_cfg: Dict):
         self.optimizer_cfg = optimizer_cfg
@@ -246,43 +266,3 @@ def build_centernet(config):
 
     model = CenterNet(**config)
     return model
-
-
-# class CenterNetDetection(nn.Module):
-#     def __init__(self, backbone: Dict, num_classes: int, **kwargs):
-#         super().__init__()
-#         self.backbone = build_backbone(**backbone)
-#         backbone_channels = self.backbone.out_channels
-
-#         self.output_heatmap = _make_output_head(backbone_channels, backbone_channels, num_classes)
-#         self.output_size = _make_output_head(backbone_channels, backbone_channels, 2)
-#         self.output_offset = _make_output_head(backbone_channels, backbone_channels, 2)
-    
-#     @classmethod
-#     def load_centernet_from_checkpoint(cls, checkpoint_path):
-#         checkpoint = torch.load(checkpoint_path)
-#         hparams = checkpoint["hyper_parameters"]
-#         state_dict = checkpoint["state_dict"]
-
-#         model = cls(**hparams)
-
-#         output_weights = [x for x in state_dict.keys() if x.startswith("output_heads.")]
-#         remove_length = len("output_heads.")
-
-#         for old_key in output_weights:
-#             new_key = "output_" + old_key[remove_length:]
-#             state_dict[new_key] = state_dict[old_key]
-#             del state_dict[old_key]
-
-#         model.load_state_dict(state_dict)
-#         return model
-
-#     def forward(self, images):
-#         features = self.backbone(images)
-
-#         heatmap = self.output_heatmap(features)
-#         heatmap = torch.sigmoid(heatmap)
-#         size = self.output_size(features)
-#         offset = self.output_offset(features)
-
-#         return heatmap, size, offset
