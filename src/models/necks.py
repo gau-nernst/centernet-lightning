@@ -1,9 +1,11 @@
 import warnings
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Union
 import math
 
 import torch
 from torch import nn
+
+from ..utils import load_config
 
 # potential dcn implementations
 # torchvision: https://pytorch.org/vision/stable/ops.html#torchvision.ops.deform_conv2d
@@ -148,3 +150,19 @@ class FPNNeck(nn.Module):
             out = out + skip                                    # combine
 
         return out
+
+def build_neck(config: Union[str, Dict], backbone_channels):
+    if isinstance(config, str):
+        config = load_config(config)
+        config = config["model"]["neck"]
+
+    if config["name"] == "simple":
+        neck = SimpleNeck(backbone_channels, **config)
+
+    elif config["name"] == "fpn":
+        neck = FPNNeck(backbone_channels, **config)
+    
+    else:
+        raise "Neck not supported"
+    
+    return neck

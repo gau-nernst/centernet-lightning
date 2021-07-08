@@ -1,5 +1,9 @@
+from typing import Dict, Union
+
 from torch import nn
 from torchvision.models import resnet, mobilenet
+
+from ..utils import load_config
 
 _backbone_channels = {
     "resnet18": [64, 128, 256, 512],
@@ -32,7 +36,7 @@ class ResNetBackbone(nn.Module):
         out2 = self.stage1(out1)    # stride 4
         out3 = self.stage2(out2)    # stride 8
         out4 = self.stage3(out3)    # stride 16
-        out5 = self.stage3(out4)    # stride 32
+        out5 = self.stage4(out4)    # stride 32
 
         if self.return_features:
             return [out1, out2, out3, out4, out5]
@@ -79,4 +83,19 @@ class MobileNetBackbone(nn.Module):
             return out
         
         return out[-1]
-        
+
+def build_backbone(config: Union[str, Dict], return_features=False):
+    if isinstance(config, str):
+        config = load_config(config)
+        config = config["model"]["backbone"]
+    
+    if config["name"].startswith("resnet"):
+        backbone = ResNetBackbone(**config, return_features=return_features)
+
+    elif config["name"].startswith("mobilenet"):
+        backbone = MobileNetBackbone(**config, return_features=return_features)
+
+    else:
+        raise "Backbone not supported"
+    
+    return backbone
