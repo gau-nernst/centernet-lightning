@@ -104,32 +104,37 @@ class LogImageCallback(pl.Callback):
     imagenet_std  = np.array(IMAGENET_STD, dtype=np.float32)
     cmap = "viridis"
 
-    def __init__(self, dataset_cfg, indices = None):
+    def __init__(self, dataset_cfg, indices = None, n_epochs=1):
         if indices is None:
             indices = range(16)
         elif isinstance(indices, int):
             indices = range(indices)
         
-        dataset = build_dataset(**dataset_cfg)
+        dataset = build_dataset(dataset_cfg)
         dataset = Subset(dataset, indices)
         self.dataset = dataset
+        self.n_epochs = n_epochs
 
     # log target heatmap on fit start
     def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
-        # get heatmap shape and allocate memory
-        img_shape = self.dataset[0]["image"].shape
-        heatmap_shape = (pl_module.num_classes, img_shape[1]//pl_module.output_stride, img_shape[2]//pl_module.output_stride)
-        heatmaps = [np.zeros(heatmap_shape) for _ in range(len(self.dataset))]
+        _, img_height, img_width = self.dataset[0]["image"].shape
+        head = pl_module.output_heads["heatmap"]
+        
+        heatmap_height = img_height // pl_module.output_stride
+        heatmap_width = img_width // pl_module.output_stride
+        heatmap_shape = (1, head.num_classes, heatmap_height, heatmap_width)
+        heatmaps = []
 
         # render target heatmap
-        for i, item in enumerate(self.dataset):
-            if pl_module.hparams["heatmap_method"] == "cornernet":
-                render_target_heatmap_cornernet(heatmaps[i], item["bboxes"], item["labels"])
-            elif pl_module.hparams["heatmap_method"] == "ttfnet":
-                render_target_heatmap_ttfnet(heatmaps[i], item["bboxes"], item["labels"])
+        for item in self.dataset:
+            bboxes = torch.tensor(item["bboxes"]).unsqueeze(0)
+            labels = torch.tensor(item["labels"]).unsqueeze(0)
+            mask = torch.ones_like(labels)
+            heatmap = head._render_target_heatmap(heatmap_shape, bboxes, labels, mask, device="cpu").squeeze(0).numpy()
 
-            heatmaps[i] = np.max(heatmaps[i], axis=0)
-            heatmaps[i] = apply_mpl_cmap(heatmaps[i], self.cmap)
+            heatmap = np.max(heatmap, axis=0)
+            heatmap = apply_mpl_cmap(heatmap, self.cmap)
+            heatmaps.append(heatmap)
 
         # make into a grid and log the image
         heatmap_grid = make_image_grid(heatmaps)
@@ -140,11 +145,14 @@ class LogImageCallback(pl.Callback):
 
     # run inference and log predicted detections
     @torch.no_grad()
-    def on_validation_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+    def on_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
+        if (pl_module.current_epoch+1) % self.n_epochs != 0:
+            return
+
         log_images = {
             "heatmap output": [],
             "heatmap (scaled)": [],
-            "backbone output": []
+            "features": []
         }
         images = []
         detections_target = {
@@ -173,14 +181,12 @@ class LogImageCallback(pl.Callback):
             detections_target["bboxes"][-1][...,[1,3]] *= img_height
             convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1], inplace=True)
 
-            # only key "image" is need to run inference
             img = img.unsqueeze(0).to(pl_module.device)
             encoded_outputs = pl_module(img)
             pred_detections = pl_module.decode_detections(encoded_outputs)
 
             for k in detections_pred.keys():
                 detections_pred[k].append(pred_detections[k][0].cpu().numpy())
-            convert_cxcywh_to_x1y1x2y2(detections_pred["bboxes"][-1], inplace=True)
 
             # log heatmap output
             heatmap_output = encoded_outputs["heatmap"][0].cpu().float()    # 80 x 128 x 128
@@ -195,10 +201,10 @@ class LogImageCallback(pl.Callback):
             log_images["heatmap (scaled)"].append(heatmap_scaled)
 
             # log backbone output
-            backbone_output = encoded_outputs["backbone_features"][0].cpu().float()
-            backbone_output = torch.mean(backbone_output, dim=0)
-            backbone_output = apply_mpl_cmap(backbone_output.numpy(), self.cmap)
-            log_images["backbone output"].append(backbone_output)
+            features = encoded_outputs["features"][0].cpu().float()
+            features = torch.mean(features, dim=0)
+            features = apply_mpl_cmap(features.numpy(), self.cmap)
+            log_images["features"].append(features)
 
         img_grid, target_bboxes, pred_bboxes = make_image_grid(images, detections_target["bboxes"], detections_pred["bboxes"])
         pred_labels = np.concatenate(detections_pred["labels"], axis=0)
