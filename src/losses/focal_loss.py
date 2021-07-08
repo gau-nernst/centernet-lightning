@@ -2,19 +2,19 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-__all__ = ["ModifiedFocalLossWithLogits", "QualityFocalLossWithLogits"]
-
 class CornerNetFocalLossWithLogits(nn.Module):
-    """Implement Modified Focal Loss (from CornerNet) with Logits to improve numerical stability via logsigmoid. Default values are from the original paper.
-
-    Args:
-        alpha: control the modulating factor to reduce the impact of easy examples. This is gamma in the original Focal loss
-        beta: control the additional weight for negative examples when y is between 0 and 1
-        reduction: either none, sum, or mean 
+    """CornerNet Focal Loss. Use logits to improve numerical stability. CornerNet: https://arxiv.org/abs/1808.01244
     """
     # reference implementations
     # https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/losses/gaussian_focal_loss.py
     def __init__(self, alpha: float = 2, beta: float = 4, reduction: str = "sum"):
+        """CornerNet Focal Loss. Default values from the paper
+
+        Args:
+            alpha: control the modulating factor to reduce the impact of easy examples. This is gamma in the original Focal loss
+            beta: control the additional weight for negative examples when y is between 0 and 1
+            reduction: either none, sum, or mean 
+        """
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.alpha = alpha
@@ -22,7 +22,6 @@ class CornerNetFocalLossWithLogits(nn.Module):
         self.reduction = reduction
     
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor):
-        # NOTE: targets is a 2D Gaussian
         pos_weight = targets.eq(1).float()              # gaussian peaks are positive samples
         neg_weight = torch.pow(1-targets, self.beta)    # when target = 1, this will become 0
 
@@ -44,13 +43,15 @@ class CornerNetFocalLossWithLogits(nn.Module):
         return loss
 
 class QualityFocalLossWithLogits(nn.Module):
-    """Implement Quality Focal Loss (from Generalized Focal Loss v1) with Logits to improve numerical stability. Default values are from the original paper.
-
-    Args:
-        beta: control the scaling/modulating factor to reduce the impact of easy examples
-        reduction: either none, sum, or mean 
+    """Quality Focal Loss. Use logits to improve numerical stability. Generalized Focal Loss: https://arxiv.org/abs/2006.04388
     """
     def __init__(self, beta: float = 2, reduction: str = "sum"):
+        """Quality Focal Loss. Default values are from the paper
+
+        Args:
+            beta: control the scaling/modulating factor to reduce the impact of easy examples
+            reduction: either none, sum, or mean 
+        """
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.beta = beta

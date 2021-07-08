@@ -23,9 +23,6 @@ def get_default_transforms(format="yolo"):
     return transforms
 
 class CollateDetection:
-    # def __init__(self, num_classes, heatmap_height, heatmap_width):
-    #     self.num_classes = num_classes
-    #     self.heatmap_
 
     def __call__(self, batch: Iterable):
         """Receive a batch of items, each contains the following keys:

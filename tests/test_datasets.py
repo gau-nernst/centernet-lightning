@@ -47,18 +47,18 @@ class TestDatasets:
         ds = VOCDataset(VOC_DIR, "val")
         self._test_dataset(ds)
 
-class TestDataloader:
-    def test_collate_fn(self):
-        # should test this function alone without using COCODataset
-        ds = COCODataset(COCO_DIR, "val2017")
-        collate_fn = CollateDetectionsCenterNet((80,128,128))
+# class TestDataloader:
+#     def test_collate_fn(self):
+#         # should test this function alone without using COCODataset
+#         ds = COCODataset(COCO_DIR, "val2017")
+#         collate_fn = CollateDetectionsCenterNet((80,128,128))
 
-        coco_dataloader = DataLoader(ds, batch_size=4, collate_fn=collate_fn)
-        batch = next(iter(coco_dataloader))
+#         coco_dataloader = DataLoader(ds, batch_size=4, collate_fn=collate_fn)
+#         batch = next(iter(coco_dataloader))
 
-        for x in ["image", "bboxes", "labels", "mask", "heatmap"]:
-            assert x in batch
-            assert isinstance(batch[x], torch.Tensor)
+#         for x in ["image", "bboxes", "labels", "mask", "heatmap"]:
+#             assert x in batch
+#             assert isinstance(batch[x], torch.Tensor)
 
-        assert batch["image"].shape == (4,3,512,512)
-        assert batch["heatmap"].shape == (4,80,128,128)
+#         assert batch["image"].shape == (4,3,512,512)
+#         assert batch["heatmap"].shape == (4,80,128,128)
