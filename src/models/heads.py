@@ -48,29 +48,26 @@ class HeatmapHead(nn.Module):
         labels = target["labels"]
         mask = target["mask"]
 
-        batch_size = heatmap.shape[0]
-        target_heatmap = torch.zeros_like(heatmap, device=heatmap.device)
-        # target_heatmap = target["target_heatmap"]
-
-        for b in range(batch_size):
-            self._render_target_heatmap(target_heatmap[b], bboxes[b], labels[b], mask[b])
+        target_heatmap = self._render_target_heatmap(heatmap.shape, bboxes, labels, mask, device=heatmap.device)
 
         loss = self.loss_function(heatmap, target_heatmap) / (mask.sum() + eps)
 
         return loss
 
-    def _render_target_heatmap(self, heatmap, bboxes, labels, mask, min_overlap=0.3, alpha=0.54, method=None, eps=1e-8):
-        """Render target heatmap for 1 image
+    def _render_target_heatmap(self, heatmap_shape, bboxes, labels, mask, min_overlap=0.3, alpha=0.54, method=None, device="cpu", eps=1e-8):
+        """Render target heatmap for a batch of images
 
         Args
-            heatmap: tensor to render heatmap to
+            heatmap_shape: shape of heatmap
             bboxes: boxes in cxcwh format
             labels: labels of the boxes
             min_overlap: for cornernet method
             alpha: for ttfnet method
         """
-        heatmap_height, heatmap_width = heatmap.shape[-2:]
+        batch_size, _, heatmap_height, heatmap_width = heatmap_shape
+        heatmap = torch.zeros(heatmap_shape, device=device)
 
+        # doing iteration on cpu is faster
         bboxes = bboxes.cpu().numpy()
         labels = labels.cpu().numpy()
         mask = mask.cpu().numpy()
@@ -80,30 +77,31 @@ class HeatmapHead(nn.Module):
         widths = bboxes[...,2] * heatmap_width
         heights = bboxes[...,3] * heatmap_height
         
-        # for i in range(len(labels)):
-        for x, y, w, h, label, m in zip(x_indices, y_indices, widths, heights, labels, mask):
-            if m == 1:
-                continue
-            radius_w, radius_h = self._get_gaussian_radius(w, h, min_overlap=min_overlap, alpha=alpha, method=method)
-            std_x = radius_w / 3
-            std_y = radius_h / 3
-            radius_w = int(radius_w)
-            radius_h = int(radius_h)
-            
-            left   = np.minimum(x, radius_w)
-            right  = np.minimum(heatmap_width - x, radius_w+1)
-            top    = np.minimum(y, radius_h+1)
-            bottom = np.minimum(heatmap_height - y, radius_h+1)
+        for b in range(batch_size):
+            for x, y, w, h, label, m in zip(x_indices[b], y_indices[b], widths[b], heights[b], labels[b], mask[b]):
+                if m == 0:
+                    continue
+                radius_w, radius_h = self._get_gaussian_radius(w, h, min_overlap=min_overlap, alpha=alpha, method=method)
+                std_x = radius_w / 3
+                std_y = radius_h / 3
+                radius_w = radius_w.astype(np.int32)
+                radius_h = radius_h.astype(np.int32)
+                
+                left   = np.minimum(x, radius_w)
+                right  = np.minimum(heatmap_width - x, radius_w+1)
+                top    = np.minimum(y, radius_h)
+                bottom = np.minimum(heatmap_height - y, radius_h+1)
 
-            grid_y = torch.arange(-radius_h, radius_h+1, device=heatmap.device).view(-1,1)
-            grid_x = torch.arange(-radius_w, radius_w+1, device=heatmap.device).view(1,-1)
+                # only gaussian and heatmap are on gpu
+                grid_y = torch.arange(-radius_h, radius_h+1, device=heatmap.device).view(-1,1)
+                grid_x = torch.arange(-radius_w, radius_w+1, device=heatmap.device).view(1,-1)
 
-            gaussian = (-(grid_x.square() / (2*std_x*std_x+eps) + grid_y.square() / (2*std_y*std_y + eps))).exp()
-            gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
+                gaussian = (-(grid_x.square() / (2*std_x*std_x+eps) + grid_y.square() / (2*std_y*std_y + eps))).exp()
+                gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
 
-            masked_heatmap = heatmap[label, y-top:y+bottom, x-left:x+right]
-            masked_gaussian = gaussian[radius_h-top:radius_h+bottom, radius_w-left:radius_w+right]
-            torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
+                masked_heatmap = heatmap[b, label, y-top:y+bottom, x-left:x+right]
+                masked_gaussian = gaussian[radius_h-top:radius_h+bottom, radius_w-left:radius_w+right]
+                torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
     
         return heatmap
 
@@ -175,10 +173,13 @@ class Box2DHead(nn.Module):
         batch_size, channels, output_height, output_width = pred_box_map.shape
 
         # 1. scale up to feature map size and convert to integer
-        x_indices = target_box[...,0].clone() * output_width
-        y_indices = target_box[...,1].clone() * output_height
-        
-        xy_indices = y_indices.long() * output_width + x_indices.long()
+        target_box = target_box.clone()
+        target_box[...,[0,2]] *= output_width
+        target_box[...,[1,3]] *= output_height
+
+        x_indices = target_box[...,0].long()
+        y_indices = target_box[...,1].long()
+        xy_indices = y_indices * output_width + x_indices
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size, channels, -1))
 
         # 2. gather outputs: left, top, right, bottom
@@ -186,8 +187,8 @@ class Box2DHead(nn.Module):
         pred_box = torch.gather(pred_box_map, dim=-1, index=xy_indices)
 
         # 3. quantized xy (floor) aligned to center of the cell (+0.5)
-        aligned_x = (torch.floor(x_indices) + 0.5)
-        aligned_y = (torch.floor(y_indices) + 0.5)
+        aligned_x = torch.floor(target_box[...,0]) + 0.5
+        aligned_y = torch.floor(target_box[...,1]) + 0.5
         pred_box[:,0,:] = aligned_x - pred_box[:,0,:]   # x1 = x - left
         pred_box[:,1,:] = aligned_y - pred_box[:,1,:]   # y1 = y - top
         pred_box[:,2,:] = aligned_x + pred_box[:,2,:]   # x2 = x + right
