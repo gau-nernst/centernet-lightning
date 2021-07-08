@@ -1,8 +1,5 @@
-import os
 import warnings
 from typing import Dict, Union
-import yaml
-
 import argparse
 
 import pytorch_lightning as pl
@@ -10,8 +7,8 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from pytorch_lightning.callbacks import LearningRateMonitor
 import wandb
 
-from src.models import build_centernet_from_cfg
-from src.datasets.builder import build_dataloader
+from src.models import build_centernet
+from src.datasets import build_dataloader
 from src.utils import LogImageCallback, load_config
 
 def train(config: Union[str, Dict]):
@@ -21,26 +18,25 @@ def train(config: Union[str, Dict]):
         config (str or dict): Either path to a config file or a config dictionary
     """
     # load config file
-    if type(config) == str:
-        assert os.path.exists(config), f"{config} does not exist"
+    if isinstance(config, str):
         config = load_config(config)
 
     # build model and dataset
-    model = build_centernet_from_cfg(config["model"])
-    train_dataloader = build_dataloader(model, **config["data"]["train"])
-    val_dataloader = build_dataloader(model, **config["data"]["validation"])
+    model = build_centernet(config["model"])
+    train_dataloader = build_dataloader(config["data"]["train"])
+    val_dataloader = build_dataloader(config["data"]["validation"])
 
-    logger = parse_logger_config(config["trainer"]["logger"], model) if "logger" in config["trainer"] else True
+    logger = parse_logger_config(config["logger"], model) if "logger" in config else True
 
     trainer = pl.Trainer(
-        **config["trainer"]["params"],
+        **config["trainer"],
         logger=logger,
         callbacks=[
             LearningRateMonitor(logging_interval="step"),
-            LogImageCallback(config["data"]["validation"])
+            # LogImageCallback(config["data"]["validation"])
         ]
     )
-   
+    
     trainer.fit(model, train_dataloader, val_dataloader)
     wandb.finish()
 

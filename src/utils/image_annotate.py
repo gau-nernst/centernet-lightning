@@ -10,7 +10,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import Subset
 import wandb
 
-from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset, render_target_heatmap_cornernet, render_target_heatmap_ttfnet
+from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset
 from .box import *
 
 RED = (1., 0., 0.)

@@ -44,55 +44,59 @@ model:
 
 data:
   train:
+    dataset:
+      type: coco
+      data_dir: datasets/COCO
+      split: train2017
 
-    dataloader_params:
+      transforms:   # any transformations from Albumentation
+        # augmentations used in CenterNet paper
+        # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
+        # they also used PCA augmentation, but didn't mention in their paper
+        HorizontalFlip:
+          p: 0.5
+        RandomResizedCrop:
+          height: 512
+          width: 512
+        ColorJitter:
+          brightness: 0.4
+          contrast: 0.4
+          saturation: 0.4
+  
+    dataloader:
       batch_size: 32
       num_workers: 8
       shuffle: True
       pin_memory: True
-    
-    transforms:
-      # augmentations used in CenterNet paper
-      # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
-      # they also used PCA augmentation, but didn't mention in their paper
-      - name: HorizontalFlip        # any transformations from Albumentation
-        params:
-          p: 0.5
-      - name: RandomResizedCrop
-        params:
-          height: 512
-          width: 512
-      - name: ColorJitter
-        params:
-          brightness: 0.4
-          contrast: 0.4
-          saturation: 0.4
 
   validation:
+    dataset:
+      type: coco
+      data_dir: datasets/COCO
+      split: val2017
 
-    dataloader_params:
+      transforms:
+        Resize:
+          height: 512
+          width: 512
+    
+    dataloader:
       batch_size: 32
       num_workers: 8
       shuffle: False
       pin_memory: True
-    
-    transforms:
-      - name: Resize
-        params:
-          height: 512
-          width: 512
 
+# pass to Lightning Trainer
 trainer:
-  params:
-    gpus: 1
-    precision: 16
-    max_epochs: 140
-    val_check_interval: 1.0
-    benchmark: True
-    gradient_clip_val: 35     # mmdetection
+  gpus: 1
+  precision: 16
+  max_epochs: 140
+  val_check_interval: 1.0
+  benchmark: True
+  gradient_clip_val: 35     # mmdetection
 
-  # logger:
-  #   name: wandb         # tensorboard or wandb
-  #   params:
-  #     project: helmet
-  #     log_model: True
+# logger:
+#   name: wandb         # tensorboard or wandb
+#   params:
+#     project: helmet
+#     log_model: True

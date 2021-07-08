@@ -11,26 +11,21 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 def get_default_transforms(format="yolo"):
-    transforms = A.Compose([
+    transforms = [
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255),
         A.Resize(512, 512),
         ToTensorV2()
-    ], bbox_params=A.BboxParams(format=format, min_area=1024, min_visibility=0.1, label_fields=["labels"]))
+    ]
+    # bbox_params = A.BboxParams(format=format, label_fields=["labels"], min_area=1024, min_visibility=0.1)
+    bbox_params = A.BboxParams(format=format, label_fields=["labels"])
+
+    transforms = A.Compose(transforms, bbox_params=bbox_params)
     return transforms
 
-class CollateDetectionsCenterNet:
-    
-    def __init__(self, heatmap_shape, heatmap_method: str = "cornernet"):
-        """Return a collate function, which does 2 things
-            - Pad bboxes and labels to maximum length within the batch
-            - Generate target heatmap
-
-        Args
-            heatmap_shape: dimension for the generated heatmap, without batch dim
-            heatmap_method: either `cornernet` or `ttfnet`
-        """
-        self.heatmap_shape = heatmap_shape
-        self.heatmap_method = heatmap_method
+class CollateDetection:
+    # def __init__(self, num_classes, heatmap_height, heatmap_width):
+    #     self.num_classes = num_classes
+    #     self.heatmap_
 
     def __call__(self, batch: Iterable):
         """Receive a batch of items, each contains the following keys:
@@ -43,34 +38,25 @@ class CollateDetectionsCenterNet:
 
         bboxes = np.zeros(shape=(batch_size, max_length, 4), dtype=np.float32)
         labels = np.zeros(shape=(batch_size, max_length), dtype=np.int32)
-        heatmap = np.zeros(shape=(batch_size, *self.heatmap_shape), dtype=np.float32)
         mask = np.zeros(shape=(batch_size, max_length), dtype=np.uint8)
+        # heatmap = np.zeros(shape=(batch_size, self.num_classes, self.heatmap_height, self.heatmap_width), dtype=np.float32)
         
         for b, item in enumerate(batch):
             num_detections = len(item["labels"])
-            mask[b][:num_detections] = 1
-            
-            for i in range(num_detections):
-                bboxes[b][i] = item["bboxes"][i]
-                labels[b][i] = item["labels"][i]
-
-            if self.heatmap_method == "cornernet":
-                render_target_heatmap_cornernet(heatmap[b], item["bboxes"], item["labels"])
-
-            elif self.heatmap_method == "ttfnet":
-                render_target_heatmap_ttfnet(heatmap[b], item["bboxes"], item["labels"])
+            if num_detections > 0:
+                bboxes[b,:num_detections] = item["bboxes"]
+                labels[b,:num_detections] = item["labels"]
+                mask[b,:num_detections] = 1
 
         image = torch.stack([x["image"] for x in batch], dim=0)   # NCHW
         bboxes = torch.from_numpy(bboxes)
         labels = torch.from_numpy(labels)
-        heatmap = torch.from_numpy(heatmap)
         mask = torch.from_numpy(mask)
 
         output = {
             "image": image,
             "bboxes": bboxes,
             "labels": labels,
-            "heatmap": heatmap,
             "mask": mask
         }
         return output
