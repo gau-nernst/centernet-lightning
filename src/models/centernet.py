@@ -27,7 +27,7 @@ class CenterNet(pl.LightningModule):
         self.neck = build_neck(neck, backbone_channels=self.backbone.out_channels)
         self.output_heads = build_output_heads(output_heads, in_channels=self.neck.out_channels)
 
-        self.output_stride = self.backbone.output_stride    # how much input image is downsampled
+        self.output_stride = self.backbone.output_stride // self.neck.upsample_stride
         
         self.task = task
         self.optimizer_cfg    = optimizer
@@ -73,50 +73,45 @@ class CenterNet(pl.LightningModule):
         # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
         # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
         # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
-        batch_size, _, out_h, out_w = encoded_outputs["heatmap"].shape
-        heatmap    = encoded_outputs["heatmap"]
-        size_map   = encoded_outputs["size"].view(batch_size, 2, -1)        # NCHW to NC(HW)
-        offset_map = encoded_outputs["offset"].view(batch_size, 2, -1)
+        heatmap = encoded_outputs["heatmap"]
+        batch_size, _, heatmap_height, heatmap_width = heatmap.shape
 
-        # pseudo-nms via max pool
-        # NOTE: must apply sigmoid before max pool
+        box_2d = encoded_outputs["box_2d"].view(batch_size, 4, -1)
+        
+        # pseudo-nms via max pool, must apply sigmoid before max pool
         heatmap = torch.sigmoid(heatmap)
         local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
         nms_mask = (heatmap == local_peaks)
         heatmap = nms_mask.float() * heatmap
 
-        # because there is only 1 size regression for each location,
-        # there can't be multiple objects at the same heatmap location
-        # thus we only consider the best candidate at each heatmap location
-        heatmap, labels = torch.max(heatmap, dim=1)     # NHW
+        # since box regression is shared, we only consider the best candidate at each heatmap location
+        heatmap, labels = torch.max(heatmap, dim=1)
 
         # flatten to run topk
-        heatmap = heatmap.view(batch_size, -1)          # N(HW)
+        heatmap = heatmap.view(batch_size, -1)
         labels = labels.view(batch_size, -1)
         topk_scores, topk_indices = torch.topk(heatmap, num_detections)
-        
         topk_labels = torch.gather(labels, dim=-1, index=topk_indices)
 
-        # extract bboxes at topk positions
-        # x, y are in output heatmap coordinates (128x128)
-        # w, h are in input image coordinates (512x512)
-        topk_x = topk_indices % out_w + torch.gather(offset_map[:,0], dim=-1, index=topk_indices)
-        topk_y = topk_indices // out_w + torch.gather(offset_map[:,1], dim=-1, index=topk_indices)
-        topk_w = torch.gather(size_map[:,0], dim=-1, index=topk_indices)
-        topk_h = torch.gather(size_map[:,1], dim=-1, index=topk_indices)
+        topk_x = topk_indices % heatmap_width + 0.5
+        topk_y = topk_indices // heatmap_width + 0.5
+
+        topk_x1 = topk_x - torch.gather(box_2d[:,0], dim=-1, index=topk_indices)    # x1 = x - left
+        topk_y1 = topk_y - torch.gather(box_2d[:,1], dim=-1, index=topk_indices)    # y1 = y - top
+        topk_x2 = topk_x + torch.gather(box_2d[:,2], dim=-1, index=topk_indices)    # x2 = x + right
+        topk_y2 = topk_y + torch.gather(box_2d[:,3], dim=-1, index=topk_indices)    # y2 = y + bottom
+
+        topk_bboxes = torch.stack([topk_x1, topk_y1, topk_x2, topk_y2], dim=-1)
 
         if normalize_bbox:
             # normalize to [0,1]
-            topk_x /= out_w
-            topk_y /= out_h
-            topk_w /= (out_w * self.output_stride)
-            topk_h /= (out_h * self.output_stride)
+            topk_bboxes[...,[0,2]] /= heatmap_width
+            topk_bboxes[...,[1,3]] /= heatmap_height
+            
         else:
-            # convert x, y to input image coordinates (512,512)
-            topk_x *= self.output_stride
-            topk_y *= self.output_stride
+            # convert to input image coordinates
+            topk_bboxes *= self.output_stride
 
-        topk_bboxes = torch.stack([topk_x, topk_y, topk_w, topk_h], dim=-1)  # NK4
         out = {
             "bboxes": topk_bboxes,
             "labels": topk_labels,
