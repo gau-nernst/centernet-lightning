@@ -5,39 +5,44 @@ import torch
 from torch import nn
 
 from ..losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
+from ..losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
 from ..utils import convert_cxcywh_to_x1y1x2y2, load_config
 
-def _make_output_head(in_channels: int, hidden_channels: int, out_channels: int, init_bias: float = None):
+class BaseHead(nn.Module):
     # Reference implementations
     # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
     # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
-    conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1)
-    relu = nn.ReLU(inplace=True)
-    conv2 = nn.Conv2d(hidden_channels, out_channels, 1)
+    
+    def __init__(self, in_channels, out_channels, hidden_channels=256, init_bias=None):
+        super().__init__()
+        conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1)
+        relu = nn.ReLU(inplace=True)
+        conv2 = nn.Conv2d(hidden_channels, out_channels, 1)
+        
+        nn.init.kaiming_normal_(conv1.weight, mode="fan_out", nonlinearity="relu")
+        if init_bias is not None:
+            conv2.bias.data.fill_(init_bias)
+        
+        self.head = nn.Sequential(conv1, relu, conv2)
 
-    if init_bias is not None:
-        conv2.bias.data.fill_(init_bias)
+    def forward(self, x):
+        return self.head(x)
+    
+    def compute_loss(self, pred, target, eps=1e-8):
+        raise NotImplementedError()
 
-    output_head = nn.Sequential(conv1, relu, conv2)
-    return output_head
-
-class HeatmapHead(nn.Module):
+class HeatmapHead(BaseHead):
     _loss_mapper = {
         "cornernet_focal": CornerNetFocalLossWithLogits,
         "quality_focal": QualityFocalLossWithLogits
     }
 
-    def __init__(self, in_channels, num_classes, init_bias=-2.19, target_method="cornernet", loss_function="cornernet_focal", loss_weight=1):
-        super().__init__()
-        self.head = _make_output_head(in_channels, in_channels, num_classes, init_bias=init_bias)
+    def __init__(self, in_channels, num_classes, hidden_channels=256, init_bias=-2.19, target_method="cornernet", loss_function="cornernet_focal", loss_weight=1):
+        super().__init__(in_channels, num_classes, hidden_channels=hidden_channels, init_bias=init_bias)
         self.num_classes = num_classes
         self.target_method = target_method
         self.loss_function = self._loss_mapper[loss_function]()
         self.loss_weight = loss_weight
-
-    def forward(self, x):
-        out = self.head(x)
-        return out
 
     def compute_loss(self, pred, target, eps=1e-8):
         # overall steps
@@ -139,26 +144,21 @@ class HeatmapHead(nn.Module):
         r = np.maximum(r,0)
         return r, r
 
-class Box2DHead(nn.Module):
+class Box2DHead(BaseHead):
     _loss_mapper = {
         "l1": nn.L1Loss,
         "smooth_l1": nn.SmoothL1Loss,
-        "iou": None,
-        "giou": None,
-        "diou": None,
-        "ciou": None
+        "iou": IoULoss,
+        "giou": GIoULoss,
+        "diou": DIoULoss,
+        "ciou": CIoULoss
     }
     out_channels = 4
 
-    def __init__(self, in_channels, init_bias=None, loss_function="l1", loss_weight=1):
-        super().__init__()
-        self.head = _make_output_head(in_channels, in_channels, self.out_channels, init_bias=init_bias)
+    def __init__(self, in_channels, hidden_channels=256, init_bias=None, loss_function="l1", loss_weight=1):
+        super().__init__(in_channels, self.out_channels, hidden_channels=hidden_channels, init_bias=init_bias)
         self.loss_function = self._loss_mapper[loss_function](reduction="none")
         self.loss_weight = loss_weight
-
-    def forward(self, x):
-        out = self.head(x)
-        return out
 
     def compute_loss(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor], eps=1e-8):
         # overall steps
@@ -195,13 +195,73 @@ class Box2DHead(nn.Module):
         pred_box[:,3,:] = aligned_y + pred_box[:,3,:]   # y2 = y + bottom
 
         # 4. cxcywh to x1y1x2y2 and apply loss
-        target_box = convert_cxcywh_to_x1y1x2y2(target_box, inplace=False).swapaxes(1,2)
-        loss = self.loss_function(pred_box, target_box) * mask.unsqueeze(1)
+        target_box = convert_cxcywh_to_x1y1x2y2(target_box, inplace=False)
+        pred_box = pred_box.swapaxes(1,2)
+        loss = self.loss_function(pred_box, target_box) * mask.unsqueeze(-1)
         loss = loss.sum() / (mask.sum() + eps)
         return loss
 
-class TimeDisplacementHead:
-    pass
+class ReIDHead(BaseHead):
+    """FairMOT head. Paper: https://arxiv.org/abs/2004.01888
+    """
+    # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L3322
+    # hidden channels = 64 as recommended by FairMOT
+    _loss_mapper = {
+        "ce": nn.CrossEntropyLoss
+    }
+
+    def __init__(self, in_channels, reid_dim=64, hidden_channels=256, init_bias=None, loss_function="ce", loss_weight=1):
+        super().__init__(in_channels, reid_dim, hidden_channels=hidden_channels, init_bias=init_bias)
+        self.loss_function = self._loss_mapper[loss_function](reduction=None)
+        self.reid_dim = reid_dim
+        
+        # used during training only
+        self.classification_heads = nn.ModuleDict()
+
+    def compute_loss(self, pred, target, eps=1e-8):
+        reid_embedding = pred["reid"]
+        sequence_name = target["sequence_name"]
+        target_box = target["bboxes"]
+        id_labels = target["ids"]
+        mask = target["mask"]
+
+        # create classification head if it does not exist yet for a particular sequence
+        if sequence_name not in self.classification_heads:
+            self.classification_heads[sequence_name] = self._make_classification_head(target["num_tracks"])
+
+        batch_size, channels, output_height, output_width = reid_embedding.shape
+        classifier = self.classification_heads[sequence_name]
+        logits = classifier(reid_embedding)
+
+        # scale up to feature map size and convert to integer
+        target_box = target_box.clone()
+        target_box[...,[0,2]] *= output_width
+        target_box[...,[1,3]] *= output_height
+
+        x_indices = target_box[...,0].long()
+        y_indices = target_box[...,1].long()
+        xy_indices = y_indices * output_width + x_indices
+        xy_indices = xy_indices.unsqueeze(1).expand((batch_size, channels, -1))
+
+        logits = logits.view(batch_size, channels, -1)
+        logits = torch.gather(logits, dim=-1, index=xy_indices)
+
+        # flatten to apply cross entropy loss
+        logits = logits.swapaxes(1,2).view(-1, channels)    # N x C x num_detections -> (N x num_detections) x C
+        id_labels = id_labels.view(-1)
+        loss = self.loss_function(logits, id_labels) * mask.view(-1)
+        loss = loss.sum() / (mask.sum() + eps)
+        return loss
+
+    def _make_classification_head(self, num_classes):
+        # mimic a 2-layer MLP
+        head = nn.Sequential(
+            nn.Conv2d(self.reid_dim, self.reid_dim, 1),
+            nn.BatchNorm2d(self.reid_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.reid_dim, num_classes, 1)
+        )
+        return head
 
 def build_output_heads(config: Union[str, Dict], in_channels):
     if isinstance(config, str):
