@@ -133,6 +133,19 @@ with torch.no_grad():
 
 `detections` have the same format as above, but results are `torch.Tensor`.
 
+### Deployment
+
+`CenterNet` is export-friendly. You can directly export a trained model to ONNX or TorchScript using PyTorch Lightning API
+
+```python
+import torch
+from src.models import CenterNet
+
+model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
+model.to_onnx("model.onnx", torch.rand((1,3,512,512)))      # export to ONNX
+model.to_torchscript("model.pt")                            # export to TorchScript
+```
+
 ## Model architecture
 
 CenterNet consists of 3 main components
