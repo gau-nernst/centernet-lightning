@@ -35,6 +35,7 @@ class ConvUpsampleBlock(nn.Module):
             raise NotImplementedError()
         else:                           # normal convolution
             conv = nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False)
+            nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
     
         bn = nn.BatchNorm2d(out_channels)
         relu = nn.ReLU(inplace=True)
