@@ -1,11 +1,14 @@
 # CenterNet
 
-Special thanks
+Built with PyTorch Lightning, support TorchScript and ONNX support, modular design to make it simple to swap backbones and necks.
+
+References
 
 - [Original CenterNet](https://github.com/xingyizhou/CenterNet)
 - [CenterNet-better-plus](https://github.com/lbin/CenterNet-better-plus)
 - [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet)
 - [TF CenterNet](https://github.com/tensorflow/models/tree/master/research/object_detection)
+- [mmdetection CenterNet](https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/dense_heads/centernet_head.py)
 
 ## Install
 
@@ -17,7 +20,6 @@ Main dependencies
 - pytorch-lightning
 - pycocotools (to read COCO dataset. Cython is required. Use [gautamchitnis](https://github.com/gautamchitnis/cocoapi) fork to support Windows)
 - albumentations (for augmentations during training)
-- numba (to speed up some calculations on CPU)
 
 Other dependencies
 
@@ -58,12 +60,12 @@ pip install pytest, wandb
 
 ### Model creation
 
-Import `build_centernet_from_cfg` from `model.py` to build a CenterNet model from a YAML file. Sample config files are provided in the `config/` directory.
+Import `build_centernet` from `models` to build a CenterNet model from a YAML file. Sample config files are provided in the `configs/` directory.
 
 ```python
-from src.models import build_centernet_from_cfg
+from src.models import build_centernet
 
-model = build_centernet_from_cfg("configs/coco_resnet34.yaml")
+model = build_centernet("configs/coco_resnet34.yaml")
 ```
 
 You also can load a CenterNet model directly from a checkpoint thanks to PyTorch Lightning.
@@ -85,18 +87,10 @@ model.eval()    # put model in evaluation mode
 img_dir = "path/to/img/dir"
 img_names = ["001.jpg", "002.jpg"]
 
-# if you want to run inference on all images in the folder
-# import os
-# img_names = [x for x in os.listdir(img_dir) if x.endswith(".jpg")]
-
-# use CUDA if available
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = model.to(device)
-
 detections = model.inference(img_dir, img_names, num_detections=100)
 
 # detections = {
-#   "bboxes": bounding boxes in cxcywh format, shape (num_images x num_detections x 4)
+#   "bboxes": bounding boxes in x1y1x2y2 format, shape (num_images x num_detections x 4)
 #   "labels": class labels, shape (num_images x num_detections)
 #   "scores": confidence scores, shape (num_images x num_detections)
 # }
@@ -112,9 +106,6 @@ To run inference on an image
 import numpy as np
 import torch
 import cv2
-
-# if CUDA is available
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # read image from file and normalize to [0,1]
 img = cv2.imread("path/to/image")
@@ -135,10 +126,6 @@ img = torch.from_numpy(img).unsqueeze(0)
 model = ...     
 model.eval()
 
-# use CUDA if available
-model = model.to(device)
-img = img.to(device)
-
 with torch.no_grad():
     encoded_outputs = model(img)
     detections = model.decode_detections(encoded_outputs)
@@ -148,86 +135,111 @@ with torch.no_grad():
 
 ## Model architecture
 
-The `CenterNet` is a "meta" architecture: it can take in any backbone (that outputs a feature map) and output the specified output heads in parallel.
+CenterNet consists of 3 main components
+
+- Backbone: any CNN classifier e.g. ResNet-50, MobileNet v2
+- Neck: upsample the last CNN output, and may perform feature map fusion e.g. FPN
+- Output head: final outputs for a particular task e.g. heatmap and box regression for object detection
+
+Since CenterNet performs single-scale detection, feature map fusion is very important to achieve good performance. It is possible to extend CenterNet to multi-scale, but that will require more complicated target sampling and potentially slower inference speed.
 
 Backbones:
 
-- [x] `SimpleBackbone`: a base CNN network with an upsample stage. It is the ResNet model specified in the original paper.
-- [x] `FPNBackbone`: a base CNN network with a feature pyramid to fuse feature maps at different resolutions.
-- [ ] `IDABackbone`: not implemented
-- [ ] `DLABackbone`: not implemented. The author claims this is the best backbone for CenterNet/Track
-- [ ] `BiFPNBackbone`: not implemented. This is an upgraded version of FPN, introduced in the EfficientDet paper. CenterNet2 also uses this new backbone
+- [x] `ResNetBackbone`: from torchvision e.g. ResNet-18/34/50
+- [x] `MobileNetBackbone`: from torchvision e.g. MobileNet v2/v2
+- [ ] `TimmBackbone`: a thin wrapper around [timm](https://github.com/rwightman/pytorch-image-models) to access Ross Wightman models
 
-Since CenterNet performs single-scale detection, feature map fusion is very important to achieve good performance.
+```python
+from src.models import ResNetBackbone
+
+backbone = ResNetBackbone("resnet18")
+```
+
+Necks:
+
+- [x] `SimpleNeck`: upsample the backbone output. This is used in the original CenterNet ResNet
+- [x] `FPNNeck`: upsample the backbone output, and fuse with high-resolution, intermediate feature maps from backbone
+- [ ] `BiFPNNeck`: not implemented. This is an upgraded version of FPN, introduced in the EfficientDet paper. CenterNet2 also uses this new backbone
+
+```python
+from src.models import SimpleNeck
+
+neck = SimpleNeck([2048])       # last channel of the backbone
+```
 
 Output heads:
 
-- [x] `heatmap`: compulsory, class scores at each position
-- [x] `size`: width and height regression, to determine bounding box size
-- [x] `offset`: center x and y offset regression, to refine center's position
-- [ ] `displacement`: for CenterTrack, not implemented
+- [x] `heatmap`: compulsory, class scores at each output position
+- [x] `box_2d`: bounding box regression, predicting left, top, right, bottom distance from the heatmap location
+- [ ] `time_displacement`: for tracking (CenterTrack)
+
+```python
+from src.models import HeatmapHead
+
+head = HeatmapHead(64, 2)       # last channel of neck and number of classes
+```
 
 Since the model is built entirely from a config file, you can use the config file to customize model's hyperparameters. Not all hyperparameters are customizable. Check the sample config files to see what is customizable.
-
-Base CNNs:
-
-- [x] (torchvision) ResNet family (resnet, resnext, wide resnet)
-- [x] (torchvision) MobileNet family (v2, v3-large, v3-small)
 
 ### The `CenterNet` class
 
 The `CenterNet` class is a Lightning Module. Key methods:
 
-- `__init__()`: constructor to build the network from hyperparameters. Pass in a config dictionary, or use the helper function `build_centernet_from_cfg()` instead.
-- `forward()`: forward pass behavior returns the encoded outputs from the output heads. This includes `heatmap`, `size`, and `offset` outputs. The encoded outputs are then used for computing loss or decoding to detections.
-- `compute_loss()`: pass in the encoded outputs from forward pass to calculate losses for each output head and total loss.
-- `decode_detections()`: pass in the encoded outputs from forward pass to decode to bboxes, labels, and scores predictions
+- `__init__()`: constructor to build the network from hyperparameters. Pass in a config dictionary, or use the helper function `build_centernet()`
+- `get_encoded_outputs()`: forward pass through the network, return a dictionary. Heatmap output is before sigmoid. This is used for computing loss
+- `forward()`: forward pass through the network, but return a namedtuple to make the model export-friendly. Heatmap output is after sigmoid
+- `compute_loss()`: pass in the encoded outputs to calculate losses for each output head and total loss
+- `decode_detections()`: pass in the encoded outputs to decode to bboxes, labels, and scores predictions
 
 ## Training
 
-### Using train script
-
-To train the model, run `train.py` and specify the config file.
+It is recommended to train the model with the train script `train.py` to train with a config file.
 
 ```bash
 python train.py --config "configs/coco_resnet34.yaml"
 ```
 
-The config file specifies everything required to train the model, including model construction, dataset, augmentations and training schedule.
-
-- Customize model architecture: See above.
-- Train on custom dataset: Datasets in COCO and Pascal VOC formats are supported. See the Datasets section below.
-- Add custom augmentations: Only Albumentation transformations are supported. This is because Albumentation will handle transforming bounding boxes for us. To specify a new augmentation, simply add to the list `transforms` under each dataset.
-- Training epochs: Change `params/max_epochs` under `trainer`
-- Optimizer: Change `optimizer` under `model`. Only optimizers from the official PyTorch is supported (in `torch.optim`). To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
-- Learning rate schedule: Change `lr_scheduler` under `model`. The schedulers are taken from the official PyTorch, but not all are supported. To use other learning rate schedulers, modify the `configure_optimizers()` method.
-
 You can also import the `train()` function from the train script to train in your own script. You can either pass in path to your config file, or pass in a config dictionary directly.
 
 ```python
 from train import train
+from src.utils import load_config
 
+# train with config file
 train("config_file.yaml")
-```
 
-As `train()` also accept a config dictionary, you can load the config file as a dictionary and directly modify its values before passing to `train()`.
-
-```python
-import yaml
-from train import train
-
-# load the config file
-config_file = "config_file.yaml"
-with open(config_file, "r") as f:
-    config = yaml.load(f, Loader=yaml.FullLoader)
-
-# modify config file parameters
+# train with config dictionary. you can modify dict values directly
+config = load_config("config_file.yaml")
 config["model"]["backbone"]["name"] = "resnet50"
-config["trainer"]["params"]["max_epochs"] = 10
-
-# run the training
+config["trainer"]["max_epochs"] = 10
 train(config)
 ```
+
+The config file specifies everything required to train the model, including model construction, dataset, augmentations and training schedule.
+
+### Custom model architecture
+
+You can modify the backbone, neck, and output heads in their own section in the config file
+
+### Custom dataset
+
+Datasets in COCO and Pascal VOC formats are supported. See the Datasets section below to ensure your folder structure is correct. Change `data_dir` and `split` accordingly. For Pascal VOC, you also need to specify `name_to_label` to map class name to class label (number)
+
+### Custom augmentations
+
+Currently Albumentation is used to do augmentation. Any Albumentation transformations are supported. To specify a new augmentation, simply add to the list `transforms` under each dataset
+
+### Custom trainer
+
+This repo uses PyTorch Lightning, so we have all the PyTorch Lightning benefits. Specify any parameters you want to pass to the `trainer` in the config file to specify the training details. For a full list of option, refer to [Lightning documentation](https://pytorch-lightning.readthedocs.io/en/stable/common/trainer.html)
+
+- Training epochs: Change `max_epochs`
+- Multi-GPU training (not tested): Change `gpus`
+- Mixed-precision training: Change `precision` to 16
+
+### Custom optimizer and learning rate scheduler
+
+Change `optimizer` and `lr_scheduler` under `model`. Only optimizers and schedulers from the official PyTorch is supported (in `torch.optim`). Not all schedulers will work, since they require extra information about training schedule. To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
 
 ### Manual training
 
@@ -245,8 +257,6 @@ trainer = pl.Trainer(
 
 trainer.fit(model, train_dataloader, val_dataloader)
 ```
-
-See the Datasets section below on how to create datasets for `CenterNet`.
 
 ## Datasets
 
@@ -360,6 +370,24 @@ If you only need inference, only key `image` is needed.
 
 WIP
 
+## Loss functions
+
+### Focal loss
+
+Focal losses are used for heatmap output. All losses here are implemented to use with logit outputs (before sigmoid) to improve numerical stability.
+
+- [x] CornerNet focal loss: first used in CornerNet. It was called Modified focal loss in the paper. Paper: https://arxiv.org/abs/1808.01244
+- [x] Quality focal loss: proposed by Generalized Focal Loss paper. It generalizes Original focal loss (Retinanet). Paper: https://arxiv.org/abs/2006.04388
+
+### Box loss
+
+Box losses are used for bounding box regression. Only 2D is supported for now.
+
+- [x] IoU loss
+- [x] Generalized IoU loss. Paper: https://arxiv.org/abs/1902.09630
+- [x] Distance IoU loss. Paper: https://arxiv.org/abs/1911.08287
+- [x] Complete IoU loss. Paper: https://arxiv.org/abs/1911.08287
+
 ## Notes
 
 ### Implementation
@@ -367,13 +395,12 @@ WIP
 Unsupported features from original CenterNet:
 
 - Deformable convolution (DCN). There are implementations from Torchvision 0.8+, Detectron2, and MMCV.
-- Deep layer aggregation (DLA)
+- Deep layer aggregation (DLA). Available from timm
 
-Notable modifications:
+There are 2 methods to render target heatmap
 
-- Focal loss: use `torch.logsigmoid()` to improve numerical stability when calculating focal loss. [CenterNet-better-plus](https://github.com/lbin/CenterNet-better-plus) and [Simple-CenterNet](https://github.com/developer0hye/Simple-CenterNet) clamp input tensor.
-
-**Target heatmap** There are two versions implemented here, one from CornerNet, which original CenterNet uses, and one from TTFNet. Since CenterNet takes a lot of work from CornerNet, I believe this target heatmap is not quite appropriate, because CenterNet and CornerNet tries to predict different types of heatmap. Moreover, the CornerNet target heatmap produces very small Gaussian kernel, which further slow down convergence.
+- CornerNet method
+- TTFNet method
 
 ### Dataset
 
