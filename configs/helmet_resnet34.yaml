@@ -5,6 +5,10 @@ model:
     name: resnet34
     pretrained: True
 
+  output_heads:
+    heatmap:
+      num_classes: 2
+
 data:
   train:
     dataset:
@@ -26,8 +30,8 @@ data:
 #   params:
 #     max_epochs: 20
   
-#   logger:
-#     name: wandb
-#     params:
-#       project: helmet
-#       log_model: True
+logger:
+  name: wandb
+  params:
+    project: helmet
+    log_model: True
