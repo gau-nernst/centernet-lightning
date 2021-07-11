@@ -7,20 +7,22 @@ import cv2
 class MOTTrackingSequence(Dataset):
     # https://motchallenge.net/instructions/
 
-    def __init__(self, data_dir):
-        info_path = os.path.join(data_dir, "seqinfo.ini")
+    def __init__(self, data_dir, sequence_name, transforms=None):
+        super().__init__()
+        info_path = os.path.join(data_dir, sequence_name, "seqinfo.ini")
         parser = configparser.ConfigParser()
         parser.read(info_path)
-        sequence_info = parser["Sequence"]
+        sequence_info = parser["Sequence"] 
         
-        self.img_dir = os.path.join(data_dir, sequence_info["imDir"])
+        self.img_dir = os.path.join(data_dir, sequence_name, sequence_info["imDir"])
+        self.transforms = transforms
         self.frame_rate = float(sequence_info["frameRate"])
         self.seq_length = int(sequence_info["seqLength"])
         self.img_width = int(sequence_info["imWidth"])
         self.img_height = int(sequence_info["imHeight"])
         self.img_ext = sequence_info["imExt"]
 
-        label_path = os.path.join(data_dir, "gt", "gt.txt")
+        label_path = os.path.join(data_dir, sequence_name, "gt", "gt.txt")
         annotations = []
         with open(label_path, "r") as f:
             for line in f:
@@ -28,37 +30,54 @@ class MOTTrackingSequence(Dataset):
                 annotations.append(line)
         
         self.num_tracks = 0
-        self.sequence = [{"id": [], "bboxes": []} for _ in range(self.seq_length)]
+        self.sequence = [{"ids": [], "labels": [], "bboxes": []} for _ in range(self.seq_length)]
         for line in annotations:
+            # frame, id, and xy are 1-index
             frame = int(line[0])
-            id = int(line[1])
+            track_id = int(line[1])
             x, y, w, h = [float(value) for value in line[2:6]]
+
+            if w < 1 or h < 1:
+                continue
+            x1 = x - 1
+            y1 = y - 1
+            x2 = x1 + w
+            y2 = y1 + h
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(self.img_width-1, x2)
+            y2 = min(self.img_height-1, y2)
+
+            # convert to normalized cxcywh
+            cx = (x1 + x2) / 2 / self.img_width
+            cy = (y1 + y2) / 2 / self.img_height
+            w = (x2 - x1) / self.img_width
+            h = (y2 - y1) / self.img_height
+            box = [cx, cy, w, h]
             
-            cx = x-1 + w/2      # minus 1 because xy is zero-indexed
-            cy = y-1 + h/2
-            box = [
-                cx / self.img_width,
-                cy / self.img_height,
-                w  / self.img_width,
-                h  / self.img_height
-            ]
-            
-            self.num_tracks = max(self.num_tracks, id)
-            self.sequence[frame-1]["id"].append(id-1)
+            self.num_tracks = max(self.num_tracks, track_id)
+            self.sequence[frame-1]["ids"].append(track_id-1)
+            self.sequence[frame-1]["labels"].append(0)      # MOT only has 1 class
             self.sequence[frame-1]["bboxes"].append(box)
 
     def __getitem__(self, index):
-        frame = index + 1
-        img = os.path.join(self.img_dir, f"{frame:06d}{self.img_ext}")
+        img = os.path.join(self.img_dir, f"{index + 1:06d}{self.img_ext}")
         img = cv2.imread(img)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        sequence = self.sequence[index]
-        ids = sequence["id"]
-        bboxes = sequence["bboxes"]
+        frame = self.sequence[index]
+        ids = frame["ids"]
+        labels = frame["labels"]
+        bboxes = frame["bboxes"]
+        
+        if self.transforms is not None:
+            augmented = self.transforms(image=img, bboxes=bboxes, labels=labels, ids=ids)
+            return augmented
+        
         item = {
             "image": img,
             "ids": ids,
+            "labels": labels,
             "bboxes": bboxes
         }
         return item

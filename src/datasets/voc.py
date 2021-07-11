@@ -7,8 +7,6 @@ import cv2
 from torch.utils.data import Dataset
 import albumentations as A
 
-from .utils import get_default_transforms
-
 def process_voc_xml(ann_file, original_bboxes=False):
     tree = ET.parse(ann_file)
     root = tree.getroot()
@@ -33,8 +31,7 @@ def process_voc_xml(ann_file, original_bboxes=False):
             bboxes.append([x1, y1, x2, y2])
         
         else:
-            # x1x2y1y2 to cxcywh and normalize to [0,1] (yolo format)
-            # clamp w and h to 1
+            # x1x2y1y2 to normalized cxcywh
             cx = (x1 + x2) / (2 * img_width)
             cy = (y1 + y2) / (2 * img_height)
             w  = (x2 - x1) / img_width
@@ -61,41 +58,31 @@ class VOCDataset(Dataset):
     """
     def __init__(self, data_dir: str, split: str, transforms: A.Compose = None, name_to_label: Dict = None):
         super().__init__()
-        if transforms is None:
-            warnings.warn("transforms is not specified. Default to normalize with ImageNet and resize to 512x512")
-            transforms = get_default_transforms()
-        
         if name_to_label is None:
             warnings.warn("name_to_label dict is not provided. label will be the original text name in the annotation file")
 
-        # e.g. VOC/ImageSets/Main/train.txt
-        img_list = os.path.join(data_dir, "ImageSets", "Main", f"{split}.txt")
-        
-        with open(img_list, "r") as f:
-            img_names = [x.rstrip() for x in f]
-        
-        labels = []
-        bboxes = []
-        # e.g. VOC/Annotations
-        ann_dir = os.path.join(data_dir, "Annotations")
-        for img_name in img_names:
-            ann_file = os.path.join(ann_dir, f"{img_name}.xml")
-
-            annotation = process_voc_xml(ann_file)
-            names = annotation["names"]
-            boxes = annotation["bboxes"]
-            if name_to_label:
-                names = [name_to_label[x] for x in names]
-
-            labels.append(names)
-            bboxes.append(boxes)
-
-        self.img_names = img_names
-        self.transforms = transforms
         self.img_dir = os.path.join(data_dir, "JPEGImages")
-        self.labels = labels
-        self.bboxes = bboxes
+        self.transforms = transforms
 
+        img_list = os.path.join(data_dir, "ImageSets", "Main", f"{split}.txt")      # VOC/ImageSets/Main/train.txt
+        with open(img_list, "r") as f:
+            self.img_names = [x.rstrip() for x in f]
+        
+        self.labels = []
+        self.bboxes = []
+        ann_dir = os.path.join(data_dir, "Annotations")
+        for img_name in self.img_names:
+            ann_file = os.path.join(ann_dir, f"{img_name}.xml")
+            annotation = process_voc_xml(ann_file)
+
+            img_labels = annotation["names"]
+            img_bboxes = annotation["bboxes"]
+            if name_to_label is not None:
+                img_labels = [name_to_label[x] for x in img_labels]
+
+            self.labels.append(img_labels)
+            self.bboxes.append(img_bboxes)
+        
     def __getitem__(self, index):
         img_name = self.img_names[index]
         img_name = os.path.join(self.img_dir, f"{img_name}.jpg")
@@ -104,11 +91,12 @@ class VOCDataset(Dataset):
 
         bboxes = self.bboxes[index]
         labels = self.labels[index]
-        
-        augmented = self.transforms(image=img, bboxes=bboxes, labels=labels)
-        img = augmented["image"]
-        bboxes = augmented["bboxes"]
-        labels = augmented["labels"]
+
+        if self.transforms is not None:        
+            augmented = self.transforms(image=img, bboxes=bboxes, labels=labels)
+            img = augmented["image"]
+            bboxes = augmented["bboxes"]
+            labels = augmented["labels"]
 
         item = {
             "image": img,
