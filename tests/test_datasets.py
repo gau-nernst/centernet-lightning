@@ -1,10 +1,11 @@
+import os
 import random
 
+import yaml
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-from src.datasets import COCODataset, VOCDataset, CrowdHumanDataset, MOTTrackingSequence, KITTITrackingSequence
+from src.datasets import COCODataset, VOCDataset, CrowdHumanDataset, MOTTrackingSequence, MOTTrackingDataset, KITTITrackingSequence, KITTITrackingDataset
 from src.datasets.utils import get_default_detection_transforms, get_default_tracking_transforms, CollateDetection, CollateTracking
 from src.datasets.builder import build_dataset, build_dataloader
 
@@ -14,6 +15,9 @@ CROWDHUMAN_DIR = "datasets/CrowdHuman"
 
 MOT_TRACKING_DIR = "datasets/MOT/MOT17/train"
 KITTI_TRACKING_DIR = "datasets/KITTI/tracking/training"
+
+sample_detection_config = "configs/base_resnet34.yaml"
+sample_tracking_config = "configs/base_tracking_resnet34.yaml"
 
 def _test_detection_dataset(dataset, augmented=False):
     for _ in range(10):
@@ -67,8 +71,8 @@ def _test_tracking_dataset(dataset, augmented=False):
         bboxes = sample["bboxes"]
         for box in bboxes:
             assert len(box) == 4
-            assert 0 < box[0] <= 1
-            assert 0 < box[1] <= 1
+            assert 0 <= box[0] <= 1
+            assert 0 <= box[1] <= 1
             assert 0 < box[2] <= 1
             assert 0 < box[3] <= 1
         
@@ -105,19 +109,78 @@ class TestDetectionDatasets:
 
 class TestTrackingDatasets:
     def test_mot_dataset(self):
-        ds = MOTTrackingSequence(MOT_TRACKING_DIR, "MOT17-02-FRCNN")
+        names = os.listdir(MOT_TRACKING_DIR)
+        sorted(names)
+
+        ds = MOTTrackingSequence(MOT_TRACKING_DIR, names[0])
+        _test_tracking_dataset(ds, augmented=False)
+        ds = MOTTrackingDataset(MOT_TRACKING_DIR, names)
         _test_tracking_dataset(ds, augmented=False)
 
         transforms = get_default_tracking_transforms()
-        ds = MOTTrackingSequence(MOT_TRACKING_DIR, "MOT17-02-FRCNN", transforms=transforms)
+        ds = MOTTrackingSequence(MOT_TRACKING_DIR, names[0], transforms=transforms)
+        _test_tracking_dataset(ds, augmented=True)
+        ds = MOTTrackingDataset(MOT_TRACKING_DIR, names, transforms=transforms)
         _test_tracking_dataset(ds, augmented=True)
     
     def test_kitti_dataset(self):
-        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, "0000")
+        names = os.listdir(os.path.join(KITTI_TRACKING_DIR, "image_02"))
+        sorted(names)
+
+        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, names[0])
+        _test_tracking_dataset(ds, augmented=False)
+        ds = KITTITrackingDataset(KITTI_TRACKING_DIR, names)
         _test_tracking_dataset(ds, augmented=False)
 
         transforms = get_default_tracking_transforms()
-        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, "0000", transforms=transforms)
+        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, names[0], transforms=transforms)
+        _test_tracking_dataset(ds, augmented=True)
+        ds = KITTITrackingDataset(KITTI_TRACKING_DIR, names, transforms=transforms)
         _test_tracking_dataset(ds, augmented=True)
 
-    
+def _get_dataset_config(config_path):
+    with open(config_path, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+
+    return config["data"]["train"]["dataset"]
+
+def _get_dataloader_config(config_path):
+    with open(config_path, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+
+    return config["data"]["train"]
+
+class TestBuilder:
+    def test_dataset_builder(self):
+        config = _get_dataset_config(sample_detection_config)
+        dataset = build_dataset(config)
+        assert isinstance(dataset, COCODataset)
+
+        config = _get_dataset_config(sample_tracking_config)
+        dataset = build_dataset(config)
+        assert isinstance(dataset, MOTTrackingDataset)
+
+    def test_dataloader_builder(self):
+        config = _get_dataloader_config(sample_detection_config)
+        dataloader = build_dataloader(config)
+        batch = next(iter(dataloader))
+
+        for x in ["image", "bboxes", "labels", "mask"]:
+            assert x in batch
+
+        assert len(batch["image"].shape) == 4
+        assert batch["bboxes"].shape[1] == batch["labels"].shape[1]
+        assert batch["bboxes"].shape[1] == batch["mask"].shape[1]
+
+        config = _get_dataloader_config(sample_tracking_config)
+        dataloader = build_dataloader(config)
+        batch = next(iter(dataloader))
+
+        for x in ["image", "bboxes", "labels", "ids", "mask"]:
+            assert x in batch
+
+        assert len(batch["image"].shape) == 4
+        assert batch["bboxes"].shape[1] == batch["labels"].shape[1]
+        assert batch["bboxes"].shape[1] == batch["ids"].shape[1]
+        assert batch["bboxes"].shape[1] == batch["mask"].shape[1]
+        

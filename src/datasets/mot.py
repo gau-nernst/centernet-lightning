@@ -4,6 +4,35 @@ import configparser
 from torch.utils.data import Dataset
 import cv2
 
+class MOTTrackingDataset(Dataset):
+    def __init__(self, data_dir, sequence_names, transforms=None):
+        super().__init__()
+        self.sequences = []
+        self.num_frames = 0
+
+        for name in sequence_names:
+            sequence = MOTTrackingSequence(data_dir, name, transforms=transforms)
+            self.sequences.append(sequence)
+            self.num_frames += len(sequence)
+            
+    def __getitem__(self, index):
+        # find which sequence the index belongs to
+        # shift track id to the appropriate range
+        track_id_offset = 0
+
+        for sequence in self.sequences:
+            if index < len(sequence):
+                item = sequence[index]
+                item["ids"] = [x + track_id_offset for x in item["ids"]]
+                
+                return item
+
+            index -= len(sequence)
+            track_id_offset += sequence.num_tracks
+
+    def __len__(self):
+        return self.num_frames
+
 class MOTTrackingSequence(Dataset):
     # https://motchallenge.net/instructions/
 
