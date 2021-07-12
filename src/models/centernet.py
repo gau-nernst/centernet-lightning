@@ -18,7 +18,8 @@ from ..utils import load_config
 from ..eval import detections_to_coco_results
 
 _output_templates = {
-    "detection": namedtuple("Detection", "heatmap box_2d")
+    "detection": namedtuple("Detection", "heatmap box_2d"),
+    "tracking": namedtuple("Tracking", "heatmap box_2d reid")
 }
 
 class CenterNet(pl.LightningModule):
@@ -78,65 +79,6 @@ class CenterNet(pl.LightningModule):
 
         return losses
 
-    def decode_detections(self, encoded_outputs: Dict[str, torch.Tensor], num_detections: int = 100, nms_kernel: int = 3, normalize_bbox: bool = False):
-        """Decode model output to detections
-
-        Args
-            encoded_outputs: outputs after calling forward pass `model(images)`
-            num_detections: number of detections to return. Default is 100
-            nms_kernel: the kernel used for max pooling (pseudo-nms). Larger values will reduce false positives. Default is 3 (original paper)
-            normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
-        """
-        # reference implementations
-        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
-        # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
-        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
-        heatmap = encoded_outputs["heatmap"]
-        batch_size, _, heatmap_height, heatmap_width = heatmap.shape
-
-        box_2d = encoded_outputs["box_2d"].view(batch_size, 4, -1)
-        
-        # pseudo-nms via max pool, must apply sigmoid before max pool
-        heatmap = torch.sigmoid(heatmap)
-        local_peaks = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=(nms_kernel-1)//2)
-        nms_mask = (heatmap == local_peaks)
-        heatmap = nms_mask.float() * heatmap
-
-        # since box regression is shared, we only consider the best candidate at each heatmap location
-        heatmap, labels = torch.max(heatmap, dim=1)
-
-        # flatten to run topk
-        heatmap = heatmap.view(batch_size, -1)
-        labels = labels.view(batch_size, -1)
-        topk_scores, topk_indices = torch.topk(heatmap, num_detections)
-        topk_labels = torch.gather(labels, dim=-1, index=topk_indices)
-
-        topk_x = topk_indices % heatmap_width + 0.5
-        topk_y = topk_indices // heatmap_width + 0.5
-
-        topk_x1 = topk_x - torch.gather(box_2d[:,0], dim=-1, index=topk_indices)    # x1 = x - left
-        topk_y1 = topk_y - torch.gather(box_2d[:,1], dim=-1, index=topk_indices)    # y1 = y - top
-        topk_x2 = topk_x + torch.gather(box_2d[:,2], dim=-1, index=topk_indices)    # x2 = x + right
-        topk_y2 = topk_y + torch.gather(box_2d[:,3], dim=-1, index=topk_indices)    # y2 = y + bottom
-
-        topk_bboxes = torch.stack([topk_x1, topk_y1, topk_x2, topk_y2], dim=-1)
-
-        if normalize_bbox:
-            # normalize to [0,1]
-            topk_bboxes[...,[0,2]] /= heatmap_width
-            topk_bboxes[...,[1,3]] /= heatmap_height
-            
-        else:
-            # convert to input image coordinates
-            topk_bboxes *= self.output_stride
-
-        out = {
-            "bboxes": topk_bboxes,
-            "labels": topk_labels,
-            "scores": topk_scores
-        }
-        return out
-
     # lightning method, return total loss here
     def training_step(self, batch, batch_idx):
         encoded_outputs = self.get_encoded_outputs(batch["image"])
@@ -156,47 +98,7 @@ class CenterNet(pl.LightningModule):
         losses = self.compute_loss(encoded_outputs, batch)
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
-
-    def test_step(self, batch, batch_idx):
-        encoded_outputs = self.get_encoded_outputs(batch["image"])
-        detections = self.decode_detections(encoded_outputs)
-
-    @torch.no_grad()
-    def inference(self, data_dir, img_names, batch_size=4, num_detections=100, nms_kernel=3, save_path=None, score_threshold=0):
-        dataset = InferenceDataset(data_dir, img_names)
-        dataloader = DataLoader(dataset, batch_size=batch_size)
-
-        all_detections = {
-            "bboxes": [],
-            "labels": [],
-            "scores": []
-        }
-
-        self.eval()
-        for batch in dataloader:
-            img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
-            img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
-
-            encoded_outputs = self.get_encoded_outputs(batch["image"].to(self.device))
-            detections = self.decode_detections(encoded_outputs, num_detections=num_detections, nms_kernel=nms_kernel, normalize_bbox=True)
-            detections = {k: v.cpu().float().numpy() for k,v in detections.items()}
-
-            detections["bboxes"][...,[0,2]] *= img_widths
-            detections["bboxes"][...,[1,3]] *= img_heights
-
-            for k, v in detections.items():
-                all_detections[k].append(v)
-
-        all_detections = {k: np.concatenate(v, axis=0) for k,v in all_detections.items()}
-        
-        if save_path is not None:
-            bboxes = detections["bboxes"].tolist()
-            labels = detections["labels"].tolist()
-            scores = detections["scores"].tolist()
-
-            detections_to_coco_results(range(len(img_names)), bboxes, labels, scores, save_path, score_threshold=score_threshold)
-
-        return all_detections
+        # TODO: evaluation
 
     def get_steps_per_epoch(self):
         # does not consider multi-gpu training
@@ -208,8 +110,8 @@ class CenterNet(pl.LightningModule):
         
         return self._steps_per_epoch
 
-    def log_histogram(self, name: str, values: torch.Tensor, freq=100):
-        if (self.trainer.global_step+1) % freq != 0:
+    def log_histogram(self, name: str, values: torch.Tensor, freq=500):
+        if self.trainer.global_step % freq != 0:
             return
 
         flatten_values = values.detach().view(-1).cpu().float().numpy()
@@ -258,6 +160,131 @@ class CenterNet(pl.LightningModule):
             }
         }
         return return_dict
+
+    def decode_heatmap(self, heatmap: torch.Tensor, nms_kernel=3, num_detections=100):
+        batch_size = heatmap.shape[0]
+
+        # pseudo-nms via max pool
+        padding = (nms_kernel - 1) // 2
+        nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
+        heatmap *= nms_mask
+        
+        # since box regression is shared, we only consider the best candidate at each heatmap location
+        heatmap, labels = torch.max(heatmap, dim=1)
+
+        # flatten to run topk
+        heatmap = heatmap.view(batch_size, -1)
+        labels = labels.view(batch_size, -1)
+        topk_scores, topk_indices = torch.topk(heatmap, num_detections)
+        topk_labels = torch.gather(labels, dim=-1, index=topk_indices)
+
+        return topk_scores, topk_indices, topk_labels
+
+    def decode_box2d(self, box_2d: torch.Tensor, indices, normalize_bbox=False):
+        batch_size, _, output_height, output_width = box_2d.shape
+
+        cx = indices % output_width + 0.5
+        cy = indices // output_width + 0.5
+
+        box_2d = box_2d.view(batch_size, 4, -1)
+        x1 = cx - torch.gather(box_2d[:,0], dim=-1, index=indices)    # x1 = cx - left
+        y1 = cy - torch.gather(box_2d[:,1], dim=-1, index=indices)    # y1 = cy - top
+        x2 = cx + torch.gather(box_2d[:,2], dim=-1, index=indices)    # x2 = cx + right
+        y2 = cy + torch.gather(box_2d[:,3], dim=-1, index=indices)    # y2 = cy + bottom
+
+        topk_bboxes = torch.stack([x1, y1, x2, y2], dim=-1)
+        if normalize_bbox:
+            # normalize to [0,1]
+            topk_bboxes[...,[0,2]] /= output_width
+            topk_bboxes[...,[1,3]] /= output_height    
+        else:
+            # convert to input image coordinates
+            topk_bboxes *= self.output_stride
+        
+        return topk_bboxes
+
+    def decode_reid(self, reid: torch.Tensor, indices):
+        batch_size, embedding_size, _, _ = reid.shape
+
+        reid = reid.view(batch_size, embedding_size, -1)
+        embeddings = torch.gather(reid, dim=-1, index=indices)
+        return embeddings
+
+    def decode_detection(self, heatmap: torch.Tensor, box_2d: torch.Tensor, num_detections: int = 100, nms_kernel: int = 3, normalize_bbox: bool = False):
+        """Decode model outputs for detection task
+
+        Args
+            heatmap: heatmap output
+            box_2d: box_2d output
+            num_detections: number of detections to return. Default is 100
+            nms_kernel: the kernel used for max pooling (pseudo-nms). Larger values will reduce false positives. Default is 3 (original paper)
+            normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
+        """
+        # reference implementations
+        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
+        # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
+        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
+        topk_scores, topk_indices, topk_labels = self.decode_heatmap(heatmap, nms_kernel=nms_kernel, num_detections=num_detections)
+        topk_bboxes = self.decode_box2d(box_2d, topk_indices, normalize_bbox=normalize_bbox)
+
+        out = {
+            "bboxes": topk_bboxes,
+            "labels": topk_labels,
+            "scores": topk_scores
+        }
+        return out
+
+    def decode_tracking(self, heatmap: torch.Tensor, box_2d: torch.Tensor, reid: torch.Tensor, num_detections=100, nms_kernel=3, normalize_bbox=False):
+        """Decode model outputs for tracking task
+        """
+        topk_scores, topk_indices, topk_labels = self.decode_heatmap(heatmap, nms_kernel=nms_kernel, num_detections=num_detections)
+        topk_bboxes = self.decode_box2d(box_2d, topk_indices, normalize_bbox=normalize_bbox)
+        topk_embeddings = self.decode_reid(reid, topk_indices)
+
+        out = {
+            "bboxes": topk_bboxes,
+            "labels": topk_labels,
+            "scores": topk_scores,
+            "embeddings": topk_embeddings
+        }
+        return out
+
+    @torch.no_grad()
+    def inference_detection(self, data_dir, img_names, batch_size=4, num_detections=100, nms_kernel=3, save_path=None, score_threshold=0):
+        dataset = InferenceDataset(data_dir, img_names)
+        dataloader = DataLoader(dataset, batch_size=batch_size)
+
+        all_detections = {
+            "bboxes": [],
+            "labels": [],
+            "scores": []
+        }
+
+        self.eval()
+        for batch in dataloader:
+            img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
+            img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
+
+            heatmap, box_2d = self(batch["image"].to(self.device))
+            detections = self.decode_detection(heatmap, box_2d, num_detections=num_detections, nms_kernel=nms_kernel, normalize_bbox=True)
+            detections = {k: v.cpu().float().numpy() for k,v in detections.items()}
+
+            detections["bboxes"][...,[0,2]] *= img_widths
+            detections["bboxes"][...,[1,3]] *= img_heights
+
+            for k, v in detections.items():
+                all_detections[k].append(v)
+
+        all_detections = {k: np.concatenate(v, axis=0) for k,v in all_detections.items()}
+        
+        if save_path is not None:
+            bboxes = detections["bboxes"].tolist()
+            labels = detections["labels"].tolist()
+            scores = detections["scores"].tolist()
+
+            detections_to_coco_results(range(len(img_names)), bboxes, labels, scores, save_path, score_threshold=score_threshold)
+
+        return all_detections
 
 def build_centernet(config):
     if isinstance(config, str):

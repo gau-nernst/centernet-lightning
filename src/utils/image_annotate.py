@@ -60,7 +60,8 @@ def draw_bboxes(
         
         pt1 = bboxes[i,:2]
         pt2 = bboxes[i,2:]
-        text = f"{labels[i]}" if scores is None else f"{labels[i]} {scores[i]:.2f}"
+        label = int(labels[i])
+        text = f"{label}" if scores is None else f"{label} {scores[i]:.2f}"
 
         text_size = 1
         (text_width, text_height), _ = cv2.getTextSize(text, font, text_size, text_size)
@@ -150,7 +151,7 @@ class LogImageCallback(pl.Callback):
             return
 
         log_images = {
-            "heatmap output": [],
+            "heatmap": [],
             "heatmap (scaled)": [],
             "features": []
         }
@@ -183,19 +184,20 @@ class LogImageCallback(pl.Callback):
 
             img = img.unsqueeze(0).to(pl_module.device)
             encoded_outputs = pl_module.get_encoded_outputs(img)
-            pred_detections = pl_module.decode_detections(encoded_outputs)
+            heatmap = torch.sigmoid(encoded_outputs["heatmap"])
+            box_2d = encoded_outputs["box_2d"]
+            pred_detections = pl_module.decode_detection(heatmap, box_2d)
 
             for k in detections_pred.keys():
                 detections_pred[k].append(pred_detections[k][0].cpu().numpy())
 
             # log heatmap output
-            heatmap_output = encoded_outputs["heatmap"][0].cpu().float()    # 80 x 128 x 128
-            heatmap_output, _ = torch.max(heatmap_output, dim=0)            # 128 x 128
-            heatmap_output = torch.sigmoid(heatmap_output)
-            heatmap_scaled = heatmap_output / torch.max(heatmap_output)
+            heatmap = heatmap[0].cpu().float()          # 80 x 128 x 128
+            heatmap, _ = torch.max(heatmap, dim=0)      # 128 x 128
+            heatmap_scaled = heatmap / torch.max(heatmap)
 
-            heatmap_output = apply_mpl_cmap(heatmap_output.numpy(), self.cmap)  # 128 x 128 x 3
-            log_images["heatmap output"].append(heatmap_output)
+            heatmap = apply_mpl_cmap(heatmap.numpy(), self.cmap)  # 128 x 128 x 3
+            log_images["heatmap"].append(heatmap)
 
             heatmap_scaled = apply_mpl_cmap(heatmap_scaled.numpy(), self.cmap)
             log_images["heatmap (scaled)"].append(heatmap_scaled)
