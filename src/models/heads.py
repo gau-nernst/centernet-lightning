@@ -210,28 +210,22 @@ class ReIDHead(BaseHead):
         "ce": nn.CrossEntropyLoss
     }
 
-    def __init__(self, in_channels, reid_dim=64, hidden_channels=256, init_bias=None, loss_function="ce", loss_weight=1):
+    def __init__(self, in_channels, max_track_ids=1000, reid_dim=64, hidden_channels=256, init_bias=None, loss_function="ce", loss_weight=1):
         super().__init__(in_channels, reid_dim, hidden_channels=hidden_channels, init_bias=init_bias)
-        self.loss_function = self._loss_mapper[loss_function](reduction=None)
+        self.loss_function = self._loss_mapper[loss_function](reduction="none")
         self.reid_dim = reid_dim
+        self.loss_weight = loss_weight
         
         # used during training only
-        self.classification_heads = nn.ModuleDict()
+        self.classifier = self._make_classification_head(max_track_ids)
 
     def compute_loss(self, pred, target, eps=1e-8):
-        reid_embedding = pred["reid"]
-        sequence_name = target["sequence_name"]
+        reid_embeddings = pred["reid"]
         target_box = target["bboxes"]
-        id_labels = target["ids"]
+        track_ids = target["ids"]
         mask = target["mask"]
 
-        # create classification head if it does not exist yet for a particular sequence
-        if sequence_name not in self.classification_heads:
-            self.classification_heads[sequence_name] = self._make_classification_head(target["num_tracks"])
-
-        batch_size, channels, output_height, output_width = reid_embedding.shape
-        classifier = self.classification_heads[sequence_name]
-        logits = classifier(reid_embedding)
+        batch_size, channels, output_height, output_width = reid_embeddings.shape
 
         # scale up to feature map size and convert to integer
         target_box = target_box.clone()
@@ -243,23 +237,24 @@ class ReIDHead(BaseHead):
         xy_indices = y_indices * output_width + x_indices
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size, channels, -1))
 
-        logits = logits.view(batch_size, channels, -1)
-        logits = torch.gather(logits, dim=-1, index=xy_indices)
-
-        # flatten to apply cross entropy loss
-        logits = logits.swapaxes(1,2).view(-1, channels)    # N x C x num_detections -> (N x num_detections) x C
-        id_labels = id_labels.view(-1)
-        loss = self.loss_function(logits, id_labels) * mask.view(-1)
+        reid_embeddings = reid_embeddings.view(batch_size, channels, -1)
+        reid_embeddings = torch.gather(reid_embeddings, dim=-1, index=xy_indices)
+        
+        # flatten, pass through classifier, apply cross entropy loss
+        reid_embeddings = reid_embeddings.swapaxes(1, 2).view(-1, channels)     # N x C x num_detections -> (N x num_detections) x C
+        logits = self.classifier(reid_embeddings)
+        loss = self.loss_function(logits, track_ids.view(-1)) * mask.view(-1)
         loss = loss.sum() / (mask.sum() + eps)
+
         return loss
 
     def _make_classification_head(self, num_classes):
-        # mimic a 2-layer MLP
+        # 2-layer MLP
         head = nn.Sequential(
-            nn.Conv2d(self.reid_dim, self.reid_dim, 1),
+            nn.Linear(self.reid_dim, self.reid_dim, bias=False),
             nn.BatchNorm2d(self.reid_dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(self.reid_dim, num_classes, 1)
+            nn.Linear(self.reid_dim, num_classes)
         )
         return head
 
