@@ -23,6 +23,7 @@ Main dependencies
 
 Other dependencies
 
+- ipykernel (to use with Jupyter)
 - pytest (for unit testing, not required to run)
 - wandb (for Weights and Biases logging, not required to run)
 
@@ -48,12 +49,12 @@ In Windows, replace `-c nvidia` with `-c conda-forge`. If you don't have NVIDIA 
 Install other dependencies
 
 ```bash
-pip install cython, pytorch-lightning, opencv-python, numba
+pip install cython pytorch-lightning opencv-python
 pip install -U albumentations --no-binary imgaug,albumentations
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
 
 # optional packages
-pip install pytest, wandb
+pip install ipykernel pytest wandb
 ```
 
 ## Usage
@@ -273,20 +274,28 @@ trainer.fit(model, train_dataloader, val_dataloader)
 
 ## Datasets
 
-Supported dataset formats
+Detection:
 
-- COCO
-- Pascal VOC
+- [x] (COCO)[https://cocodataset.org/]
+- [x] (Pascal VOC)[http://host.robots.ox.ac.uk/pascal/VOC/]
+- [x] (CrowdHuman)[https://www.crowdhuman.org/]
 
-There is also `InferenceDataset` class for simple inference.
+Tracking:
+
+- [x] (MOT)[https://motchallenge.net/]
+- [x] (KITTI Tracking)[http://www.cvlibs.net/datasets/kitti/eval_tracking.php]
+
+Most Object Detection datasets are in COCO or Pascal VOC format. Any other datasets not mentioned above but have the same format will also work. There is also `InferenceDataset` class for simple inference.
 
 ### Dataset and dataloader builder
 
 WIP
 
-### COCO format
+### Detection datasets
 
-Download and unzip the COCO dataset. The root dataset folder should have folders `annotations` and `images` like the following:
+#### COCO
+
+For COCO dataset and others in COCO format, make sure you have the following folder structure:
 
 ```bash
 COCO_root
@@ -300,8 +309,6 @@ COCO_root
 │   ├── ...
 ```
 
-If you have other datasets in COCO format, make sure they also have the above folder structure.
-
 To create a COCO dataset:
 
 ```python
@@ -310,7 +317,7 @@ from src.datasets import COCODataset
 dataset = COCODataset("COCO_root", "val2017")
 ```
 
-### Pascal VOC format
+#### Pascal VOC
 
 Folder structure:
 
@@ -331,9 +338,7 @@ VOC_root
 │   ├── ...
 ```
 
-All images inside the `JPEGImages` folder must have file extension `.jpg`. All annotation files inside the `Annotations` folder must have file extension `.xml`. Dataset splits inside `ImageSets/Main` folder must have file extension `.txt`.
-
-The names inside a dataset split file (e.g. `train.txt`) is a list of names without file extension, separated by a line break character.
+All images inside the `JPEGImages` folder must have file extension `.jpg`. All annotation files inside the `Annotations` folder must have file extension `.xml`. Dataset splits inside `ImageSets/Main` folder must have file extension `.txt`. The names inside a dataset split file (e.g. `train.txt`) is a list of names without file extension, separated by a line break character.
 
 ```python
 from src.datasets import VOCDataset
@@ -347,6 +352,14 @@ dataset = VOCDataset("VOC_root", "train", name_to_label=name_to_label)
 ```
 
 `name_to_label` is optional, but required for training. Since annotation files only contain the string names (e.g. `person` or `car`), you need to map them to integer labels for training.
+
+#### CrowdHuman
+
+### Tracking datasets
+
+#### MOT
+
+#### KITTI Tracking
 
 ### Inference dataset
 
