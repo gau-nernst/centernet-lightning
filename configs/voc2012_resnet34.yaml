@@ -1,0 +1,47 @@
+__base__: base_resnet34.yaml
+
+model:
+  output_heads:
+    heatmap:
+      num_classes: 20
+  
+data:
+  train:
+    dataset:
+      type: voc
+      data_dir: datasets/VOC2012
+      split: trainval_train
+      name_to_label: &voc2021_name_to_label
+        person: 0
+        bird: 1
+        cat: 2
+        cow: 3
+        dog: 4
+        horse: 5
+        sheep: 6
+        aeroplane: 7
+        bicycle: 8
+        boat: 9
+        bus: 10
+        car: 11
+        motorbike: 12
+        train: 13
+        bottle: 14
+        chair: 15
+        diningtable: 16
+        pottedplant: 17
+        sofa: 18
+        tvmonitor: 19
+        
+  validation:
+    dataset:
+      type: voc
+      data_dir: datasets/VOC2012
+      split: trainval_val
+      name_to_label: *voc2021_name_to_label
+
+# logger:
+#   name: wandb
+#   params:
+#     project: voc2012
+#     log_model: True
