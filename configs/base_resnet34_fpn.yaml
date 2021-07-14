@@ -1,0 +1,98 @@
+model:
+  task: detection
+  backbone:
+    name: resnet34
+    pretrained: True
+    input_channels: 3
+
+  neck:
+    name: fpn    # simple or fpn
+    params:
+      upsample_channels: [256, 128, 64]
+      upsample_type: neareast   # conv_transpose, bilinear, neareast
+      conv_type: normal         # normal, separable, dcn
+      
+  output_heads:
+    heatmap:
+      num_classes: 80
+      init_bias: -2.19
+      target_method: cornernet         # cornernet or ttfnet
+      loss_function: cornernet_focal   # cornernet or quality (gfocal)
+      loss_weight: 1
+
+    box_2d:
+      init_bias: 0
+      loss_function: l1       # iou, giou, l1, or smooth_l1
+      loss_weight: 0.1
+
+  optimizer:           # mmdetection
+    name: SGD          # any optimizers from torch.optim
+    params:
+      lr: 0.02
+      momentum: 0.9
+      weight_decay: 0.0001
+
+  lr_scheduler:
+    name: OneCycleLR    # any lr_scheduler from torch.optim.lr_scheduler
+    params:
+      max_lr: 0.02
+
+data:
+  train:
+    dataset:
+      type: coco
+      data_dir: datasets/COCO
+      split: train2017
+
+      # any transformations from Albumentation
+      # augmentations used in CenterNet paper
+      # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
+      # they also used PCA augmentation, but didn't mention in their paper
+      transforms:
+        HorizontalFlip:
+          p: 0.5
+        RandomResizedCrop:
+          height: 512
+          width: 512
+        ColorJitter:
+          brightness: 0.4
+          contrast: 0.4
+          saturation: 0.4
+  
+    dataloader:
+      batch_size: 32
+      num_workers: 8
+      shuffle: True
+      pin_memory: True
+
+  validation:
+    dataset:
+      type: coco
+      data_dir: datasets/COCO
+      split: val2017
+
+      transforms:
+        Resize:
+          height: 512
+          width: 512
+    
+    dataloader:
+      batch_size: 32
+      num_workers: 8
+      shuffle: False
+      pin_memory: True
+
+# pass to Lightning Trainer
+trainer:
+  gpus: 1
+  precision: 16
+  max_epochs: 140
+  val_check_interval: 1.0
+  benchmark: True
+  gradient_clip_val: 35     # mmdetection
+
+# logger:
+#   name: wandb         # tensorboard or wandb
+#   params:
+#     project: helmet
+#     log_model: True
