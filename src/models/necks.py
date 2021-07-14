@@ -127,7 +127,7 @@ class FPNNeck(nn.Module):
         self.skip_connections = nn.ModuleList()
         self.up_layers = nn.ModuleList()
         self.conv_layers = nn.ModuleList()
-        self.fusion_weights = nn.ParameterList()
+        self.fusion_weights = nn.ParameterList() if use_fusion_weights else None
 
         for i in range(len(upsample_channels)):
             # build skip connections
@@ -146,9 +146,10 @@ class FPNNeck(nn.Module):
             self.conv_layers.append(conv)
 
             # build fusion weight
-            fusion_w = nn.Parameter(torch.tensor(1.))
-            fusion_w.requires_grad = use_fusion_weights
-            self.fusion_weights.append(fusion_w)
+            if use_fusion_weights:
+                fusion_w = nn.Parameter(torch.tensor(1.))
+                fusion_w.requires_grad = use_fusion_weights
+                self.fusion_weights.append(fusion_w)
 
         self.out_channels = upsample_channels[-1]
         self.upsample_stride = 2**len(upsample_channels)
@@ -160,8 +161,10 @@ class FPNNeck(nn.Module):
         for i in range(len(self.conv_layers)):
             skip = self.skip_connections[i](features[-2-i]) # skip connection
             up = self.up_layers[i](out)                     # upsample
-            out = skip + up * self.fusion_weights[i]        # combine with fusion weight
-            out = self.conv_layers[i](out)                  # output conv
+            
+            if self.fusion_weights is not None:
+                up *= self.fusion_weights[i]                # combine with fusion weight
+            out = self.conv_layers[i](skip + up)            # output conv
 
         return out
 

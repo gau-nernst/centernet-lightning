@@ -242,9 +242,9 @@ class ReIDHead(BaseHead):
         reid_embeddings = torch.gather(reid_embeddings, dim=-1, index=xy_indices)
         
         # flatten, pass through classifier, apply cross entropy loss
-        reid_embeddings = reid_embeddings.swapaxes(1, 2).view(-1, channels)     # N x C x num_detections -> (N x num_detections) x C
+        reid_embeddings = reid_embeddings.swapaxes(1, 2).reshape(-1, channels)  # N x C x num_detections -> (N x num_detections) x C
         logits = self.classifier(reid_embeddings)
-        loss = self.loss_function(logits, track_ids.view(-1)) * mask.view(-1)
+        loss = self.loss_function(logits, track_ids.view(-1).long()) * mask.view(-1)
         loss = loss.sum() / (mask.sum() + eps)
 
         return loss
@@ -253,7 +253,7 @@ class ReIDHead(BaseHead):
         # 2-layer MLP
         head = nn.Sequential(
             nn.Linear(self.reid_dim, self.reid_dim, bias=False),
-            nn.BatchNorm2d(self.reid_dim),
+            nn.BatchNorm1d(self.reid_dim),
             nn.ReLU(inplace=True),
             nn.Linear(self.reid_dim, num_classes)
         )
@@ -267,7 +267,8 @@ def build_output_heads(config: Union[str, Dict], in_channels):
     output_heads = nn.ModuleDict()
     output_head_mapper = {
         "heatmap": HeatmapHead,
-        "box_2d": Box2DHead
+        "box_2d": Box2DHead,
+        "reid": ReIDHead
     }
     for name, params in config.items():
         head = output_head_mapper[name](in_channels, **params)

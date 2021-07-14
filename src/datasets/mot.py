@@ -66,16 +66,17 @@ class MOTTrackingSequence(Dataset):
             track_id = int(line[1])
             x, y, w, h = [float(value) for value in line[2:6]]
 
-            if w < 1 or h < 1:
-                continue
             x1 = x - 1
             y1 = y - 1
             x2 = x1 + w
             y2 = y1 + h
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(self.img_width-1, x2)
-            y2 = min(self.img_height-1, y2)
+            x1 = min(self.img_width-1, max(0, x1))
+            y1 = min(self.img_height-1, max(0, y1))
+            x2 = min(self.img_width-1, max(0, x2))
+            y2 = min(self.img_height-1, max(0, y2))
+
+            if x2-x1 < 1 or y2-y1 < 1:
+                continue
 
             # convert to normalized cxcywh
             cx = (x1 + x2) / 2 / self.img_width
