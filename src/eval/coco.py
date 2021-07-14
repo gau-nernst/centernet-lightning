@@ -1,7 +1,7 @@
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-def evaluate_coco(ann_file, results_file, cat_ids):
+def evaluate_coco(ann_file, results_file, cat_ids=None):
     metrics = (
         "AP", "AP50", "AP75", "AP_small", "AP_medium", "AP_large",
         "AR_1", "AR_10", "AR_100", "AR_small", "AR_medium", "AR_large"
@@ -13,7 +13,8 @@ def evaluate_coco(ann_file, results_file, cat_ids):
     
     coco_eval = COCOeval(coco_gt, coco_pred, "bbox")
     coco_eval.params.imgIds = img_ids
-    coco_eval.params.catIds = cat_ids
+    if cat_ids is not None:
+        coco_eval.params.catIds = cat_ids
 
     coco_eval.evaluate()
     coco_eval.accumulate()
