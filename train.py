@@ -33,7 +33,7 @@ def train(config: Union[str, Dict]):
         logger=logger,
         callbacks=[
             LearningRateMonitor(logging_interval="step"),
-            # LogImageCallback(config["data"]["validation"])
+            LogImageCallback(config["data"]["validation"]["dataset"], n_epochs=5)
         ]
     )
     

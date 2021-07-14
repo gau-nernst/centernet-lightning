@@ -183,6 +183,7 @@ class Box2DHead(BaseHead):
         xy_indices = xy_indices.unsqueeze(1).expand((batch_size, channels, -1))
 
         # 2. gather outputs: left, top, right, bottom
+        pred_box_map = torch.clamp_min(pred_box_map, 0)
         pred_box_map = pred_box_map.view(batch_size, channels, -1)          # flatten
         pred_box = torch.gather(pred_box_map, dim=-1, index=xy_indices)
 
