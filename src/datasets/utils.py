@@ -15,7 +15,7 @@ def get_default_transforms(resize_height=512, resize_width=512, box_format="yolo
         A.Resize(resize_height, resize_width),
         ToTensorV2()
     ]
-    bbox_params = A.BboxParams(format=box_format, label_fields=label_fields)
+    bbox_params = A.BboxParams(format=box_format, label_fields=label_fields, min_area=1)
 
     transforms = A.Compose(transforms, bbox_params=bbox_params)
     return transforms

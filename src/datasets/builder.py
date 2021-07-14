@@ -47,7 +47,7 @@ def parse_transforms(config: Dict[str, Dict], format="yolo", task="detection"):
     transforms.append(ToTensorV2())
 
     label_fields = ["labels", "ids"] if task == "tracking" else ["labels"]
-    bbox_params = A.BboxParams(format=format, label_fields=label_fields)
+    bbox_params = A.BboxParams(format=format, label_fields=label_fields, min_area=1)
 
     transforms = A.Compose(transforms, bbox_params=bbox_params)
     return transforms
