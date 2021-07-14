@@ -88,8 +88,8 @@ class CenterNet(pl.LightningModule):
 
         self.log("epoch_frac", self.global_step / self.get_steps_per_epoch())     # log this to view graph with epoch as x-axis
 
-        self.log_histogram("output_values/heatmap", encoded_outputs["heatmap"])
-        self.log_histogram("output_values/box_2d", encoded_outputs["box_2d"])
+        for k,v in encoded_outputs.items():
+            self.log_histogram(f"output_values/{k}", v)
 
         return losses["total"]
 
