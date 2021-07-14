@@ -7,10 +7,9 @@ model:
 
   neck:
     name: fpn    # simple or fpn
-    params:
-      upsample_channels: [256, 128, 64]
-      upsample_type: neareast   # conv_transpose, bilinear, neareast
-      conv_type: normal         # normal, separable, dcn
+    upsample_channels: [256, 128, 64]
+    upsample_type: neareast   # conv_transpose, bilinear, neareast
+    conv_type: normal         # normal, separable, dcn
       
   output_heads:
     heatmap:

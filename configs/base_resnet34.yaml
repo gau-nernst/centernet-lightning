@@ -7,15 +7,12 @@ model:
 
   neck:
     name: simple    # simple or fpn
-    params:
-      upsample_channels: [256, 128, 64]
-      upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
-      conv_type: normal                 # normal, separable, dcn
-      
-      deconv_kernel: 3            # only used with conv_transpose
-      deconv_init_bilinear: True  # only used with conv_transpose
-      
-      skip_kernel: 3    # only used for fpn
+    upsample_channels: [256, 128, 64]
+    upsample_type: conv_transpose     # conv_transpose, bilinear, neareast
+    conv_type: normal                 # normal, separable, dcn
+    
+    deconv_kernel: 3            # only used when upsample_type = conv_transpose
+    deconv_init_bilinear: True  # only used when upsample_type = conv_transpose
 
   output_heads:
     heatmap:
