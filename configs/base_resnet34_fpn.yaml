@@ -8,7 +8,7 @@ model:
   neck:
     name: fpn    # simple or fpn
     upsample_channels: [256, 128, 64]
-    upsample_type: neareast   # conv_transpose, bilinear, neareast
+    upsample_type: nearest   # conv_transpose, bilinear, nearest
     conv_type: normal         # normal, separable, dcn
       
   output_heads:
