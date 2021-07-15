@@ -1,7 +1,9 @@
 from typing import Dict, Union
+from copy import deepcopy
 
 from torch import nn
 from torchvision.models import resnet, mobilenet
+import timm
 
 from ..utils import load_config
 
@@ -21,6 +23,11 @@ class ResNetBackbone(nn.Module):
         super().__init__()
         backbone = resnet.__dict__[name](pretrained=pretrained)
 
+        # group max pool with stage1 to make output features have consistent strides
+        # may replace 7x7 conv with 3 3x3 conv
+        # self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
+        # self.stage1 = nn.Sequential(backbone.maxpool, backbone.layer1)
+        
         self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
         self.stage1 = backbone.layer1
         self.stage2 = backbone.layer2
@@ -84,6 +91,23 @@ class MobileNetBackbone(nn.Module):
         
         return out[-1]
 
+class TimmBackbone(nn.Module):
+    def __init__(self, name: str, pretrained: bool = True, return_features=False, **kwargs):
+        super().__init__()
+        self.backbone = timm.create_model(name, pretrained=pretrained, features_only=True)
+        
+        self.out_channels = self.backbone.feature_info.channels()
+        self.return_features = return_features
+        self.output_stride = self.backbone.feature_info.reduction()[-1]
+
+    def forward(self, x):
+        out = self.backbone(x)
+        
+        if self.return_features:
+            return out
+        
+        return out[-1]
+
 def build_backbone(config: Union[str, Dict], return_features=False):
     if isinstance(config, str):
         config = load_config(config)
@@ -94,6 +118,11 @@ def build_backbone(config: Union[str, Dict], return_features=False):
 
     elif config["name"].startswith("mobilenet"):
         backbone = MobileNetBackbone(**config, return_features=return_features)
+
+    elif config["name"].startswith("timm"):
+        config = deepcopy(config)
+        config["name"] = config["name"][len("timm_"):]
+        backbone = TimmBackbone(**config, return_features=return_features)
 
     else:
         raise "Backbone not supported"
