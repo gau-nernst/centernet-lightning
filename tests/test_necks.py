@@ -1,6 +1,6 @@
 import torch
 
-from src.models.necks import SimpleNeck, FPNNeck, build_neck
+from src.models.necks import SimpleNeck, FPNNeck, IDANeck, BiFPNNeck, build_neck
 
 test_config = "configs/test_config.yaml"
 
@@ -47,3 +47,11 @@ class TestBuilder:
         config = {"name": "fpn"}
         neck = build_neck(config, backbone_channels=[64,128,256,512,1024])
         assert isinstance(neck, FPNNeck)
+
+        config = {"name": "ida"}
+        neck = build_neck(config, backbone_channels=[64,128,256,512,1024])
+        assert isinstance(neck, IDANeck)
+
+        config = {"name": "bifpn"}
+        neck = build_neck(config, backbone_channels=[64,128,256,512,1024])
+        assert isinstance(neck, BiFPNNeck)

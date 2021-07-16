@@ -1,9 +1,9 @@
-import warnings
-from typing import Dict, Iterable, Union
+from typing import Dict, Union
 import math
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from ..utils import load_config
 
@@ -47,7 +47,7 @@ def _init_bilinear_upsampling(deconv_layer):
     for c in range(1, w.size(0)):
         w[c,0,:,:] = w[0,0,:,:]
 
-def _make_conv(conv_type="normal", in_channels=None, out_channels=None, kernel_size=3, **kwargs):
+def _make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, **kwargs):
     assert conv_type in ("dcn", "separable", "normal")
 
     if conv_type == "dcn":          # deformable convolution
@@ -64,12 +64,30 @@ def _make_conv(conv_type="normal", in_channels=None, out_channels=None, kernel_s
 
     return conv_layer
 
+def _make_downsample(downsample_type="max", conv_channels=None, conv_kernel=3, **kwargs):
+    assert downsample_type in ("max", "average", "conv")
+
+    if downsample_type == "conv":
+        downsample = nn.Conv2d(conv_channels, conv_channels, conv_kernel, stride=2, padding="same", bias=False)
+        bn = nn.BatchNorm2d(conv_channels)
+        relu = nn.ReLU(inplace=True)
+        downsample_layer = nn.Sequential(downsample, bn, relu)
+
+        nn.init.kaiming_normal_(downsample.weight, mode="fan_out", nonlinearity="relu")
+    
+    elif downsample_type == "max":
+        downsample_layer = nn.MaxPool2d(2, 2)
+    else:
+        downsample_layer = nn.AvgPool2d(2, 2)
+    
+    return downsample_layer
+
 class ConvUpsampleBlock(nn.Module):
     """Convolution followed by Upsample
     """
     def __init__(self, in_channels, out_channels, upsample_type="conv_transpose", conv_type="normal", deconv_kernel=4, deconv_init_bilinear=True, **kwargs):
         super().__init__()
-        self.conv = _make_conv(conv_type, in_channels, out_channels)
+        self.conv = _make_conv(in_channels, out_channels, conv_type=conv_type)
         self.upsample = _make_upsample(upsample_type, deconv_channels=out_channels, deconv_kernel=deconv_kernel, deconv_init_bilinear=deconv_init_bilinear)
 
     def forward(self, x):
@@ -91,15 +109,15 @@ class SimpleNeck(nn.Module):
         
         # build upsample stage
         conv_upsample_layers = []
-        conv_up_layer = ConvUpsampleBlock(backbone_channels[-1], upsample_channels[0], **kwargs)
+        conv_up_layer = ConvUpsampleBlock(backbone_channels[-1], upsample_channels[0], upsample_type=upsample_type, conv_type=conv_type, **kwargs)
         # conv_up_layer = nn.Sequential(
-        #     _make_conv(conv_type, backbone_channels[-1], upsample_channels[0]),
+        #     _make_conv(backbone_channels[-1], upsample_channels[0], conv_type=conv_type),
         #     _make_upsample(upsample_type, upsample_channels[0], **kwargs)
         # )
         conv_upsample_layers.append(conv_up_layer)
 
         for i in range(1, len(upsample_channels)):
-            conv_up_layer = ConvUpsampleBlock(upsample_channels[i-1], upsample_channels[i], **kwargs)
+            conv_up_layer = ConvUpsampleBlock(upsample_channels[i-1], upsample_channels[i], upsample_type=upsample_type, conv_type=conv_type, **kwargs)
             conv_upsample_layers.append(conv_up_layer)
 
         self.upsample = nn.Sequential(*conv_upsample_layers)
@@ -113,7 +131,8 @@ class SimpleNeck(nn.Module):
 
 class FPNNeck(nn.Module):
     """FPN neck with some modifications. Paper: https://arxiv.org/abs/1612.03144
-        - Fusion weight: https://arxiv.org/abs/2011.02298
+        - Weighted fusion is used in Bi-FPN: https://arxiv.org/abs/1911.09070
+        - Fusion factor (same as weighted fusion): https://arxiv.org/abs/2011.02298
 
     Formulation
           16x16: out_5 = conv_skip(in_5)
@@ -121,13 +140,13 @@ class FPNNeck(nn.Module):
           64x64: out_3 = conv(skip(in_3) + up(out_4) x w_3)
         128x128: out_2 = conv(skip(in_2) + up(out_3) x w_2)
     """
-    def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], upsample_type="nearest", conv_type="normal", use_fusion_weights=False, **kwargs):
+    def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], upsample_type="nearest", conv_type="normal", weighted_fusion=False, **kwargs):
         super().__init__()
         self.top_conv = nn.Conv2d(backbone_channels[-1], upsample_channels[0], 1)
         self.skip_connections = nn.ModuleList()
         self.up_layers = nn.ModuleList()
         self.conv_layers = nn.ModuleList()
-        self.fusion_weights = nn.ParameterList() if use_fusion_weights else None
+        self.weights = nn.ParameterList() if weighted_fusion else None
 
         for i in range(len(upsample_channels)):
             # build skip connections
@@ -142,14 +161,14 @@ class FPNNeck(nn.Module):
 
             # build output conv layers
             out_conv_channels = upsample_channels[i+1] if i < len(upsample_channels)-1 else upsample_channels[-1]
-            conv = _make_conv(conv_type=conv_type, in_channels=out_channels, out_channels=out_conv_channels, **kwargs)
+            conv = _make_conv(out_channels, out_conv_channels, conv_type=conv_type, **kwargs)
             self.conv_layers.append(conv)
 
             # build fusion weight
-            if use_fusion_weights:
+            if weighted_fusion:
                 fusion_w = nn.Parameter(torch.tensor(1.))
-                fusion_w.requires_grad = use_fusion_weights
-                self.fusion_weights.append(fusion_w)
+                fusion_w.requires_grad = weighted_fusion
+                self.weights.append(fusion_w)
 
         self.out_channels = upsample_channels[-1]
         self.upsample_stride = 2**len(upsample_channels)
@@ -162,23 +181,173 @@ class FPNNeck(nn.Module):
             skip = self.skip_connections[i](features[-2-i]) # skip connection
             up = self.up_layers[i](out)                     # upsample
             
-            if self.fusion_weights is not None:
-                up *= self.fusion_weights[i]                # combine with fusion weight
-            out = self.conv_layers[i](skip + up)            # output conv
+            if self.weights is not None:
+                w = F.relu(self.weights[i])
+                out = (skip + up*w) / (1 + w)       # combine with fusion weight
+            else:
+                out = skip + up
+            out = self.conv_layers[i](out)          # output conv
 
         return out
+
+class Fuse(nn.Module):
+    """Fusion node to be used for feature fusion. The last input will be resized.
+
+    Formula
+        non-weight: out = conv(in1 + resize(in2))
+        weighted: out = conv((in1*w1 + resize(in2)*w2) / (w1 + w2 + eps))
+    """
+    def __init__(self, in_channels, out, resize, upsample="nearest", downsample="max", conv_type="normal", weighted_fusion=False):
+        super().__init__()
+        assert resize in ("up", "down")
+
+        self.project = nn.ModuleList()
+        for in_c in in_channels:
+            project_conv = nn.Conv2d(in_c, out, 1) if in_c != out else None # match output channels
+            self.project.append(project_conv)
+        if resize == "up":
+            self.resize = _make_upsample(upsample_type=upsample, deconv_channels=out)
+        else:
+            self.resize = _make_downsample(downsample=downsample, conv_channels=out)
+        self.output_conv = _make_conv(out, out, conv_type=conv_type)
+        
+        self.weights = nn.Parameter(torch.ones(len(in_channels)), requires_grad=True) if weighted_fusion else None
+
+    def forward(self, *features, eps=1e-6):
+        out = []
+        for project, x in zip(self.project, features):
+            out.append(project(x) if project is not None else x)
+        
+        out[-1] = self.resize(out[-1])
+
+        # weighted fusion
+        if self.weights is not None:
+            weights = F.relu(self.weights)
+            out = torch.stack([out[i]*weights[i] for i in range(len(out))], dim=-1)
+            out = torch.sum(out, dim=-1) / (torch.sum(weights) + eps)
+        else:
+            out = torch.stack(out, dim=-1)
+            out = torch.sum(out, dim=-1)
+        
+        out = self.output_conv(out)
+        return out
+
+class IDANeck(nn.Module):
+    """IDA neck used in Deep Layer Aggregation. Paper: https://arxiv.org/abs/1707.06484
+    
+        backbone: [256, 512, 1024, 2048]
+        layer 1: [64, 128, 256]
+        layer 2: [64, 128]
+        layer 3: [64]
+    """
+    def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], upsample_type="nearest", conv_type="normal", weighted_fusion=False, **kwargs):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.n = len(upsample_channels)
+
+        last_channels = backbone_channels[-1:-2-self.n:-1]  # reverse list
+        out_channels = upsample_channels
+        for _ in range(self.n):
+            fuse_nodes = nn.ModuleList()
+            for j in range(len(out_channels)):
+                top = last_channels[j]
+                lateral = last_channels[j+1]
+                out = out_channels[j]
+
+                fuse = Fuse([lateral, top], out, "up", upsample=upsample_type, conv_type=conv_type, weighted_fusion=weighted_fusion)
+                fuse_nodes.append(fuse)   
+
+            self.layers.append(fuse_nodes)
+            last_channels = out_channels
+            out_channels = out_channels[1:]
+
+        self.out_channels = upsample_channels[-1]
+        self.upsample_stride = 2**len(upsample_channels)
+
+    def forward(self, features):
+        out = features[-1:-2-self.n:-1]     # reverse list
+        for fuse_nodes in self.layers:
+            out = [fuse_nodes[i](out[i+1], out[i]) for i in range(len(fuse_nodes))]
+        return out[0]
+
+class BiFPNLayer(nn.Module):
+    """"""
+    def __init__(self, num_features=4, num_channels=64, upsample_type="nearest", downsample_type="max", conv_type="normal", weighted_fusion=True, **kwargs):
+        super().__init__()
+        assert isinstance(num_channels, int)
+        self.num_features = num_features
+        self.top_down = nn.ModuleList()
+        self.bottom_up = nn.ModuleList()
+
+        # build top down
+        for _ in range(num_features-1):
+            fuse = Fuse([num_channels]*2, num_channels, "up", upsample=upsample_type, conv_type=conv_type, weighted_fusion=weighted_fusion)
+            self.top_down.append(fuse)
+
+        # build bottom up
+        for _ in range(1, num_features-1):
+            fuse = Fuse([num_channels]*3, num_channels, "down", downsample=downsample_type, conv_type=conv_type, weighted_fusion=weighted_fusion)
+            self.bottom_up.append(fuse)
+
+        self.last_fuse = Fuse([num_channels]*2, num_channels, "down", downsample=downsample_type, conv_type=conv_type, weighted_fusion=weighted_fusion)
+
+    def forward(self, features):
+        # top down: Ptd_6 = conv(Pin_6 + up(Ptd_7))
+        topdowns = [None] * len(features)
+        topdowns[-1] = features[-1]
+        for i in range(len(self.top_down)):
+            topdowns[-2-i] = self.top_down[i](features[-2-i], topdowns[-1-i])
+        
+        # bottom up: Pout_6 = conv(Pin_6 + Ptd_6 + down(Pout_5))
+        out = [None] * len(features)
+        out[0] = topdowns[0]
+        for i in range(len(self.bottom_up)):
+            out[i+1] = self.bottom_up[i](features[i+1], topdowns[i+1], out[i])
+        out[-1] = self.last_fuse(features[-1], out[-2])
+        
+        return out
+
+class BiFPNNeck(nn.Module):
+    def __init__(self, backbone_channels, num_layers=3, num_features=4, num_channels=64, upsample_type="nearest", downsample_type="max", conv_type="normal", weighted_fusion=True, **kwargs):
+        super().__init__()
+        self.project = nn.ModuleList()
+        self.layers = nn.ModuleList()
+        self.num_features = num_features
+
+        for b_channels in backbone_channels[-num_features:]:
+            conv = nn.Conv2d(b_channels, num_channels, 1)
+            self.project.append(conv)
+
+        for _ in range(num_layers):
+            bifpn_layer = BiFPNLayer(num_features=num_features, num_channels=num_channels, upsample_type=upsample_type, downsample_type=downsample_type, conv_type=conv_type, weighted_fusion=weighted_fusion, **kwargs)
+            self.layers.append(bifpn_layer)
+
+        self.out_channels = num_channels
+        self.upsample_stride = 2**(num_features-1)
+
+    def forward(self, features):
+        out = [project(x) for project, x in zip(self.project, features[-self.num_features:])]
+        print(len(out))
+        for bifpn_layer in self.layers:
+            out = bifpn_layer(out)
+        
+        return out[0]
 
 def build_neck(config: Union[str, Dict], backbone_channels):
     if isinstance(config, str):
         config = load_config(config)
         config = config["model"]["neck"]
 
-    if config["name"] == "simple":
-        neck = SimpleNeck(backbone_channels, **config)
+    neck_mapper = {
+        "simple": SimpleNeck,
+        "fpn": FPNNeck,
+        "ida": IDANeck,
+        "bifpn": BiFPNNeck
+    }
 
-    elif config["name"] == "fpn":
-        neck = FPNNeck(backbone_channels, **config)
-    
+    if config["name"] in neck_mapper:
+        neck = neck_mapper[config["name"]](backbone_channels, **config)
+
     else:
         raise "Neck not supported"
     
