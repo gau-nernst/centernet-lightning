@@ -4,7 +4,7 @@ import argparse
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-from pytorch_lightning.callbacks import LearningRateMonitor
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 import wandb
 
 from src.models import build_centernet
@@ -32,6 +32,7 @@ def train(config: Union[str, Dict]):
         **config["trainer"],
         logger=logger,
         callbacks=[
+            ModelCheckpoint(monitor="val/total_loss"),
             LearningRateMonitor(logging_interval="step"),
             LogImageCallback(config["data"]["validation"]["dataset"], n_epochs=5)
         ]
