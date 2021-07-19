@@ -69,11 +69,13 @@ class CenterNet(pl.LightningModule):
         
         return output
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], ignore_reid=False, eps: float = 1e-8):
         """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
         losses = {"total": torch.tensor(0., device=self.device)}
         for name, head in self.output_heads.items():
+            if ignore_reid and name == "reid":
+                continue
             losses[name] = head.compute_loss(preds, targets, eps=eps)
             losses["total"] += losses[name] * head.loss_weight
 
@@ -95,7 +97,7 @@ class CenterNet(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         encoded_outputs = self.get_encoded_outputs(batch["image"])
-        losses = self.compute_loss(encoded_outputs, batch)
+        losses = self.compute_loss(encoded_outputs, batch, ignore_reid=True)    # during validation, only evaluate detection loss
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
         # TODO: evaluation
@@ -203,11 +205,13 @@ class CenterNet(pl.LightningModule):
         
         return topk_bboxes
 
-    def decode_reid(self, reid: torch.Tensor, indices):
+    def decode_reid(self, reid: torch.Tensor, indices: torch.Tensor):
         batch_size, embedding_size, _, _ = reid.shape
 
         reid = reid.view(batch_size, embedding_size, -1)
+        indices = indices.unsqueeze(1).expand(batch_size, embedding_size, -1)
         embeddings = torch.gather(reid, dim=-1, index=indices)
+        embeddings = embeddings.swapaxes(1,2)
         return embeddings
 
     def decode_detection(self, heatmap: torch.Tensor, box_2d: torch.Tensor, num_detections: int = 100, nms_kernel: int = 3, normalize_bbox: bool = False):
@@ -290,6 +294,9 @@ def build_centernet(config):
     if isinstance(config, str):
         config = load_config(config)
         config = config["model"]
-
-    model = CenterNet(**config)
+    
+    if "load_from_checkpoint" in config:
+        model = CenterNet.load_from_checkpoint(config["load_from_checkpoint"], strict=False, **config)
+    else:
+        model = CenterNet(**config)
     return model

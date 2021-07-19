@@ -33,6 +33,7 @@ class Tracker:
 
         self.tracks: List[Track] = []
 
+    @torch.no_grad()
     def step(self, img: torch.Tensor, **kwargs):
         """
 
@@ -66,7 +67,8 @@ class Tracker:
         embeddings = embeddings[mask]
 
         # embedding cost matrix
-        current_embeddings = torch.cat([x.embedding for x in self.tracks], dim=0)
+        embedding_dim = embeddings.shape[-1]
+        current_embeddings = torch.cat([x.embedding for x in self.tracks], dim=0) if self.tracks else torch.zeros((1,embedding_dim))
         cost_matrix = cosine_distance_matrix(embeddings, current_embeddings)
 
         # match new detections with current active tracks
