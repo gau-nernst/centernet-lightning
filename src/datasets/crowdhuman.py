@@ -6,7 +6,7 @@ import cv2
 from PIL import Image
 
 class CrowdHumanDataset(Dataset):
-    def __init__(self, data_dir, split, transforms=None, name_to_label={"person": 0, "mask": 1}, img_ext=".jpg"):
+    def __init__(self, data_dir, split, transforms=None, name_to_label={"person": 0, "mask": 1}, ignore_mask=True, img_ext=".jpg"):
         super().__init__()
         self.img_dir = os.path.join(data_dir, split, "Images")
         self.transforms = transforms
@@ -34,6 +34,9 @@ class CrowdHumanDataset(Dataset):
             img_labels = []
             img_bboxes = []
             for detection in line["gtboxes"]:
+                if ignore_mask and detection["tag"] == "mask":
+                    continue
+                
                 label = name_to_label[detection["tag"]]
                 x, y, w, h = detection["fbox"]
 
