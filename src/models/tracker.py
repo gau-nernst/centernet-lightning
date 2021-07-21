@@ -4,8 +4,8 @@ import torch
 from torch import nn
 from scipy.optimize import linear_sum_assignment
 
-def cosine_distance_matrix(v1: torch.Tensor, v2: torch.Tensor):
-    """
+def cosine_distance_matrix(v1: torch.Tensor, v2: torch.Tensor, eps=1e-6):
+    """Calculate cosine distance matrix. When 1 vector is a zero vector, cosine distance with it will be 1
     Args
         v1: dim M x D
         v2: dim N x D
@@ -13,24 +13,25 @@ def cosine_distance_matrix(v1: torch.Tensor, v2: torch.Tensor):
     Return
         v: dim M x N
     """
-    v1_n = v1 / v1.norm(dim=-1, keepdim=True)
-    v2_n = v2 / v2.norm(dim=-1, keepdim=True)
+    v1_n = v1 / v1.norm(dim=-1, keepdim=True).clip(min=eps)
+    v2_n = v2 / v2.norm(dim=-1, keepdim=True).clip(min=eps)
 
     cost_matrix = 1 - torch.matmul(v1_n, v2_n.T)
     return cost_matrix
-
 
 class Tracker:
     # Tracktor: https://github.com/phil-bergmann/tracking_wo_bnw/blob/master/src/tracktor/tracker.py
     # DeepSORT: https://github.com/ZQPei/deep_sort_pytorch/blob/master/deep_sort/sort/tracker.py
 
-    def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1):
+    def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1, reid_threshold=0.2):
         self.model = model
         self.device = device
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
         self.detection_threshold = detection_threshold
+        self.reid_threshold = reid_threshold
 
+        self.next_track_id = 0
         self.tracks: List[Track] = []
 
     @torch.no_grad()
@@ -68,32 +69,42 @@ class Tracker:
 
         # embedding cost matrix
         embedding_dim = embeddings.shape[-1]
-        current_embeddings = torch.cat([x.embedding for x in self.tracks], dim=0) if self.tracks else torch.zeros((1,embedding_dim))
+        current_embeddings = torch.stack([x.embedding for x in self.tracks], dim=0) if self.tracks else torch.zeros((1,embedding_dim))
         cost_matrix = cosine_distance_matrix(embeddings, current_embeddings)
 
         # match new detections with current active tracks
-        # row is new detections, column is current active tracks
+        # row is new detections, column is current tracks
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        for row, col in zip(row_ind, col_ind):
-            self.tracks[col].update(bboxes[row], embeddings[row])
+        reid_threshold = kwargs.get("reid_threshold", self.reid_threshold)
+        assigned_det = set()
+        assigned_tracks = set()
         
-        row_ind = set(row_ind)
-        col_ind = set(col_ind)
-        unmatched_detections = [x for x in range(len(bboxes)) if x not in row_ind]
-        unmatched_tracks = [x for x in range(len(self.tracks)) if x not in col_ind]
+        # only match if cost < threshold
+        for row, col in zip(row_ind, col_ind):
+            if cost_matrix[row, col] < reid_threshold:
+                self.tracks[col].update(bboxes[row], embeddings[row])
+                self.tracks[col].active = True
+
+                assigned_det.add(row)
+                assigned_tracks.add(col)
+
+        unmatched_detections = [x for x in range(len(bboxes)) if x not in assigned_det]
+        unmatched_tracks = [x for x in range(len(self.tracks)) if x not in assigned_tracks]
 
         # create new tracks from unmatched detections
         for idx in unmatched_detections:
-            track = Track(len(self.tracks), bboxes[idx], labels[idx], embeddings[idx])
+            track = Track(self.next_track_id, bboxes[idx], labels[idx], embeddings[idx])
             self.tracks.append(track)
+            self.next_track_id += 1
         
         # mark and delete unmatched tracks
         for idx in unmatched_tracks:
-            self.tracks[idx].to_delete = True
-        self.tracks = [x for x in self.tracks if not x.to_delete]
+            # self.tracks[idx].to_delete = True
+            self.tracks[idx].active = False
+        # self.tracks = [x for x in self.tracks if not x.to_delete]
 
 class Track:
-    def __init__(self, track_id, bbox, label, embedding, smoothing_factor=0.5):
+    def __init__(self, track_id, bbox, label, embedding, smoothing_factor=0.9):
         self.track_id = track_id
         self.bbox = bbox
         self.label = label
@@ -106,3 +117,6 @@ class Track:
     def update(self, bbox, embedding):
         self.bbox = bbox
         self.embedding = (1-self.smoothing_factor) * self.embedding + self.smoothing_factor * embedding
+
+    def __repr__(self):
+        return f"track id: {self.track_id}, bbox: {self.bbox}, label: {self.label}, embedding: {len(self.embedding)} dim"
