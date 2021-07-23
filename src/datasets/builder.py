@@ -9,6 +9,7 @@ from .voc import VOCDataset
 from .crowdhuman import CrowdHumanDataset
 from .mot import MOTTrackingDataset
 from .kitti import KITTITrackingDataset
+from .detection_for_tracking import DetectionForTracking
 from .utils import CollateDetection, CollateTracking, IMAGENET_MEAN, IMAGENET_STD
 
 __all__ = ["build_dataset", "build_dataloader"]
@@ -26,8 +27,13 @@ def build_dataset(config):
     task = "tracking" if dataset_type.endswith("-tracking") else "detection"
     transforms = parse_transforms(config["transforms"], task=task) if "transforms" in config else None
 
-    params = {k:v for k,v in config.items() if k not in ("type", "transforms")}
+    params = {k:v for k,v in config.items() if k not in ("type", "transforms", "detection_for_tracking")}
     dataset = _dataset_mapper[dataset_type](transforms=transforms, **params)
+    
+    # use detection dataset for tracking task
+    if "detection_for_tracking" in config and config["detection_for_tracking"]:
+        dataset = DetectionForTracking(dataset)
+
     return dataset
 
 def build_dataloader(config):
