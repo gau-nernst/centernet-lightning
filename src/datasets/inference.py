@@ -27,6 +27,7 @@ class InferenceDataset(Dataset):
         if img_names is None:
             warnings.warn("img_names is not provided. JPEG files will be auto-discovered inside data_dir")
             img_names = [x for x in os.listdir(data_dir) if x.endswith(self._IMG_EXT)]
+            img_names.sort()
             warnings.warn(f"{len(img_names)} JPEG files discovered")
 
         self.data_dir   = data_dir
