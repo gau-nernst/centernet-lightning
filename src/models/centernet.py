@@ -88,8 +88,6 @@ class CenterNet(pl.LightningModule):
         for k,v in losses.items():
             self.log(f"train/{k}_loss", v)
 
-        self.log("epoch_frac", self.global_step / self.get_steps_per_epoch())     # log this to view graph with epoch as x-axis
-
         for k,v in encoded_outputs.items():
             self.log_histogram(f"output_values/{k}", v)
 
@@ -289,6 +287,28 @@ class CenterNet(pl.LightningModule):
             detections_to_coco_results(range(len(img_names)), bboxes, labels, scores, save_path, score_threshold=score_threshold)
 
         return all_detections
+
+    # allow loading checkpoint with mismatch weights
+    # https://github.com/PyTorchLightning/pytorch-lightning/issues/4690#issuecomment-731152036
+    def on_load_checkpoint(self, checkpoint):
+        state_dict = checkpoint["state_dict"]
+        model_state_dict = self.state_dict()
+        is_changed = False
+        for k in state_dict:
+            if k in model_state_dict:
+                if state_dict[k].shape != model_state_dict[k].shape:
+                    warnings.warn(
+                        f"Skip loading parameter: {k}, "
+                        f"required shape: {model_state_dict[k].shape}, "
+                        f"loaded shape: {state_dict[k].shape}"
+                    )
+                    state_dict[k] = model_state_dict[k]
+                    is_changed = True
+            else:
+                is_changed = True
+
+        if is_changed:
+            checkpoint.pop("optimizer_states", None)
 
 def build_centernet(config):
     if isinstance(config, str):
