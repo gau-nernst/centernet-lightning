@@ -1,0 +1,116 @@
+model:
+  task: tracking
+
+  backbone:
+    name: resnet34
+    pretrained: True
+  
+  neck:
+    name: fpn
+    upsample_channels: [256, 128, 64]
+    upsample_type: nearest
+    conv_type: normal
+
+  output_heads:
+    heatmap:
+      num_classes: 1
+      init_bias: -2.19
+      target_method: cornernet
+      loss_function: cornernet_focal
+      loss_weight: 1
+
+    box_2d:
+      init_bias: 10
+      loss_function: giou
+      loss_weight: 5
+
+    reid:
+      init_bias: null
+      loss_function: ce
+      max_track_ids: 2900
+      loss_weight: 1
+
+  optimizer:
+    name: Adam
+    params:
+      lr: 0.0001
+      # momentum: 0.9
+      weight_decay: 0.0001
+
+  lr_scheduler:
+    name: OneCycleLR
+    params:
+      max_lr: 0.0001
+
+data:
+  train:
+    dataset:
+      type: mot-tracking
+      data_dir: datasets/MOT/train
+      sequence_names:
+      - MOT17-04-FRCNN    # 1050 frames
+      - MOT17-11-FRCNN    # 900
+      - MOT17-05-FRCNN    # 837
+      - MOT17-13-FRCNN    # 750
+      - MOT17-10-FRCNN    # 654
+      - MOT20-02    # 2782
+      - MOT20-03    # 2405
+      - MOT20-05    # 3315
+
+      transforms:
+        HorizontalFlip:
+          p: 0.5
+        Affine:
+          scale: [0.8, 1.25]
+          rotate: [-10, 10]
+        RandomResizedCrop:
+          width: 1088
+          height: 608
+        ColorJitter:
+          brightness: 0.4
+          contrast: 0.4
+          saturation: 0.4
+        Cutout:
+          num_holes: 10
+          max_w_size: 60
+          max_h_size: 60
+  
+    dataloader:
+      batch_size: 16
+      num_workers: 8
+      shuffle: True
+      pin_memory: True
+
+  validation:
+    dataset:
+      type: mot-tracking
+      data_dir: datasets/MOT/train
+      sequence_names:
+      - MOT17-02-FRCNN    # 600
+      - MOT17-09-FRCNN    # 525
+      - MOT20-01    # 429
+      
+      transforms:
+        Resize:
+          width: 1088
+          height: 608
+    
+    dataloader:
+      batch_size: 16
+      num_workers: 8
+      shuffle: False
+      pin_memory: True
+
+trainer:
+  gpus: 1
+  precision: 16
+  max_epochs: 30
+  val_check_interval: 1.0
+  benchmark: True
+  gradient_clip_val: 35
+
+logger:
+  name: wandb         # tensorboard or wandb
+  params:
+    project: mot
+    log_model: True
