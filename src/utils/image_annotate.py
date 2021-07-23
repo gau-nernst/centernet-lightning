@@ -60,7 +60,7 @@ def draw_bboxes(
         
         pt1 = bboxes[i,:2]
         pt2 = bboxes[i,2:]
-        label = int(labels[i])
+        label = labels[i] if isinstance(labels[i], str) else int(labels[i])
         text = f"{label}" if scores is None else f"{label} {scores[i]:.2f}"
 
         text_size = 1
@@ -105,13 +105,15 @@ class LogImageCallback(pl.Callback):
     imagenet_std  = np.array(IMAGENET_STD, dtype=np.float32)
     cmap = "viridis"
 
-    def __init__(self, dataset_cfg, indices = None, n_epochs=1):
-        if indices is None:
-            indices = range(16)
-        elif isinstance(indices, int):
-            indices = range(indices)
-        
+    def __init__(self, dataset_cfg, indices = None, n_epochs=1, random=False):
+        super().__init__()
         dataset = build_dataset(dataset_cfg)
+        
+        if indices is None:
+            indices = 16
+        if isinstance(indices, int):
+            indices = np.random.randint(len(dataset), size=indices) if random else range(indices)
+
         dataset = Subset(dataset, indices)
         self.dataset = dataset
         self.n_epochs = n_epochs
@@ -147,7 +149,7 @@ class LogImageCallback(pl.Callback):
     # run inference and log predicted detections
     @torch.no_grad()
     def on_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule):
-        if (pl_module.current_epoch+1) % self.n_epochs != 0:
+        if pl_module.current_epoch % self.n_epochs != 0:
             return
 
         log_images = {
