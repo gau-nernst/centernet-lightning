@@ -19,8 +19,9 @@ _backbone_channels = {
 }
 
 class ResNetBackbone(nn.Module):
-    def __init__(self, name: str, pretrained: bool = True, return_features=False, **kwargs):
+    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, **kwargs):
         super().__init__()
+        self.frozen_stages = frozen_stages
         backbone = resnet.__dict__[name](pretrained=pretrained)
 
         # group max pool with stage1 to make output features have consistent strides
@@ -38,6 +39,8 @@ class ResNetBackbone(nn.Module):
         self.return_features = return_features
         self.output_stride = 32
 
+        self.freeze_stages()
+
     def forward(self, x):
         out1 = self.stem(x)         # stride 4
         out2 = self.stage1(out1)    # stride 4
@@ -50,9 +53,23 @@ class ResNetBackbone(nn.Module):
         
         return out5
 
+    # mmdetection trick
+    # https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/backbones/resnet.py#L612
+    def freeze_stages(self):
+        stages = [self.stem, self.stage1, self.stage2, self.stage3, self.stage4]
+        for i in range(self.frozen_stages):
+            stages[i].eval()        # set to evaluation mode so BN won't update running statistics
+            for param in stages[i].parameters():
+                param.requires_grad = False
+
+    def train(self, mode=True):
+        super().train(mode=mode)
+        self.freeze_stages()
+
 class MobileNetBackbone(nn.Module):
-    def __init__(self, name: str, pretrained: bool = True, return_features=False, **kwargs):
+    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, **kwargs):
         super().__init__()
+        self.frozen_stages = frozen_stages
 
         # conv with stride = 2 (downsample) will be the first layer of each stage
         # this is to ensure that at each stage, it is the most refined feature map at that resolution
@@ -79,6 +96,8 @@ class MobileNetBackbone(nn.Module):
         self.return_features = return_features
         self.output_stride = 32
 
+        self.freeze_stages()
+
     def forward(self, x):
         out = []
         next = x
@@ -90,6 +109,18 @@ class MobileNetBackbone(nn.Module):
             return out
         
         return out[-1]
+
+    # mmdetection trick
+    # https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/backbones/resnet.py#L612
+    def freeze_stages(self):
+        for i in range(self.frozen_stages):
+            self.stages[i].eval()       # set to evaluation mode so BN won't update running statistics
+            for param in self.stages[i].parameters():
+                param.requires_grad = False
+
+    def train(self, mode):
+        super().train(mode=mode)
+        self.freeze_stages()
 
 class TimmBackbone(nn.Module):
     def __init__(self, name: str, pretrained: bool = True, return_features=False, **kwargs):
