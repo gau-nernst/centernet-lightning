@@ -131,9 +131,6 @@ class Tracker:
         
         matching_time = time.time() - time0
 
-        # remove tracks
-        self.tracks = [x for x in self.tracks if not x.to_delete]
-
         return model_time, decode_time, matching_time
 
     @torch.no_grad()
@@ -155,8 +152,8 @@ class Tracker:
         embeddings = embeddings[mask]
 
         if self.tracks:
-            current_embeddings = torch.stack([x.embedding for x in self.tracks if not x.to_delete], dim=0)
-            current_bboxes = torch.stack([x.bbox for x in self.tracks if not x.to_delete], dim=0)
+            current_embeddings = torch.stack([x.embedding for x in self.tracks], dim=0)
+            current_bboxes = torch.stack([x.bbox for x in self.tracks], dim=0)
         else:
             embedding_dim = embeddings.shape[-1]
             current_embeddings = torch.zeros((1,embedding_dim), device=device)
@@ -178,6 +175,7 @@ class Tracker:
             if cost_matrix[row, col] < matching_threshold:
                 self.tracks[col].update(bboxes[row], embeddings[row])
                 self.tracks[col].active = True
+                self.tracks[col].inactive_age = 0
 
                 assigned_det.add(row)
                 assigned_tracks.add(col)
@@ -198,6 +196,9 @@ class Tracker:
         # increment inactive age and mark for delete
         for track in self.tracks:
             track.step()
+
+        # remove tracks
+        self.tracks = [x for x in self.tracks if not x.to_delete]
 
 class Track:
     def __init__(self, track_id, bbox, label, embedding, smoothing_factor=0.9, max_inactive_age=30):
