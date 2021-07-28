@@ -16,6 +16,22 @@ from .box import *
 RED = (1., 0., 0.)
 BLUE = (0., 0., 1.)
 
+def revert_imagenet_normalization(img):
+    if isinstance(img, np.ndarray):     # NHWC or HWC
+        mean = np.array(IMAGENET_MEAN)
+        std = np.array(IMAGENET_STD)
+
+    elif isinstance(img, torch.Tensor):
+        mean = torch.tensor(IMAGENET_MEAN).view(3,1,1)  # CHW
+        std = torch.tensor(IMAGENET_STD).view(3,1,1)
+
+        if len(img.shape) == 4: # NCHW
+            mean = mean.unsqueeze()
+            std = std.unsqueeze()
+        
+    img = img * std + mean
+    return img
+
 def draw_bboxes(
     img: np.ndarray,
     bboxes: np.ndarray,

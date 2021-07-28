@@ -1,18 +1,23 @@
 from typing import Dict
 import warnings
 from collections import namedtuple
+import os
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
+from tqdm import tqdm
 
 from .backbones import build_backbone
 from .necks import build_neck
 from .heads import build_output_heads
+from .tracker import MatchingCost, Tracker
 from ..datasets import InferenceDataset
 from ..utils import load_config
 from ..eval import detections_to_coco_results
@@ -253,7 +258,12 @@ class CenterNet(pl.LightningModule):
 
     @torch.no_grad()
     def inference_detection(self, data_dir, img_names, batch_size=4, num_detections=100, nms_kernel=3, save_path=None, score_threshold=0):
-        dataset = InferenceDataset(data_dir, img_names)
+        transforms = A.Compose([
+            A.Resize(height=512, width=512),
+            A.Normalize(),
+            ToTensorV2()
+        ])
+        dataset = InferenceDataset(data_dir, img_names, transforms=transforms, file_ext=".jpg")
         dataloader = DataLoader(dataset, batch_size=batch_size)
 
         all_detections = {
@@ -263,7 +273,7 @@ class CenterNet(pl.LightningModule):
         }
 
         self.eval()
-        for batch in dataloader:
+        for batch in tqdm(dataloader):
             img_widths = batch["original_width"].clone().numpy().reshape(-1,1,1)
             img_heights = batch["original_height"].clone().numpy().reshape(-1,1,1)
 
@@ -287,6 +297,38 @@ class CenterNet(pl.LightningModule):
             detections_to_coco_results(range(len(img_names)), bboxes, labels, scores, save_path, score_threshold=score_threshold)
 
         return all_detections
+
+    @torch.no_grad()
+    def inference_tracking(self, data_dir, save_dir):
+        matching_cost = MatchingCost(reid_weight=1, box_weight=0)
+        tracker = Tracker(self, device=self.device, detection_threshold=0.3, num_detections=300, matching_cost=matching_cost, smoothing_factor=0.5)
+
+        transforms = A.Compose([
+            A.Resize(height=608, width=1088),
+            A.Normalize(),
+            ToTensorV2(),
+        ])
+        dataset = InferenceDataset(data_dir, transforms=transforms)
+        dataloader = DataLoader(dataset, batch_size=16, num_workers=8, shuffle=False, pin_memory=True)
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        total_model = 0
+        total_decode = 0
+        total_matching = 0
+
+        self.eval()
+        for images in tqdm(dataloader):
+            model_time, decode_time, matching_time = tracker.step_batch(images["image"], output_dir=save_dir)
+
+            total_model += model_time
+            total_decode += decode_time
+            total_matching += matching_time
+
+        total_time = total_model + total_decode + total_matching
+        print("Model time", total_model, total_model/total_time, sep="\t")
+        print("Decode time", total_decode, total_decode/total_time, sep="\t")
+        print("Matching time", total_matching, total_matching/total_time, sep="\t")
 
     # allow loading checkpoint with mismatch weights
     # https://github.com/PyTorchLightning/pytorch-lightning/issues/4690#issuecomment-731152036

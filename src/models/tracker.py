@@ -9,7 +9,7 @@ from torchvision.ops import box_iou, generalized_box_iou
 from scipy.optimize import linear_sum_assignment
 import cv2
 
-from ..utils.image_annotate import draw_bboxes
+from ..utils.image_annotate import revert_imagenet_normalization , draw_bboxes
 
 torch.backends.cudnn.benchmark = True
 
@@ -53,7 +53,7 @@ class Tracker:
     # Tracktor: https://github.com/phil-bergmann/tracking_wo_bnw/blob/master/src/tracktor/tracker.py
     # DeepSORT: https://github.com/ZQPei/deep_sort_pytorch/blob/master/deep_sort/sort/tracker.py
 
-    def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.9, transforms=None):
+    def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.9):
         model.eval()
         self.model = model
         self.device = device
@@ -63,7 +63,6 @@ class Tracker:
         self.matching_threshold = matching_threshold
         self.matching_cost = matching_cost if matching_cost is not None else MatchingCost(reid_weight=1, box_weight=0)
         self.smoothing_factor = smoothing_factor
-        self.transforms = transforms
 
         self.frame = 0
         self.next_track_id = 0
@@ -83,7 +82,6 @@ class Tracker:
             kwargs: override post-processing config parameters e.g. nms_kernel, num_tracks
         """
         device = kwargs.get("device", self.device)
-        transforms = kwargs.get("transforms", self.transforms)
         nms_kernel = kwargs.get("nms_kernel", self.nms_kernel)
         num_detections = kwargs.get("num_detections", self.num_detections)
         
@@ -93,10 +91,9 @@ class Tracker:
         if output_dir is not None:
             images_np = images.cpu().numpy().transpose(0,2,3,1)
             images_np = np.ascontiguousarray(images_np)
+            images_np = revert_imagenet_normalization(images_np)
         
         images = images.to(device)
-        if transforms is not None:
-            images = transforms(images)
 
         time0 = time.time()
         heatmap, box_2d, reid = self.model(images)
