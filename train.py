@@ -32,7 +32,7 @@ def train(config: Union[str, Dict]):
         **config["trainer"],
         logger=logger,
         callbacks=[
-            ModelCheckpoint(monitor="val/total_loss"),
+            ModelCheckpoint(monitor="val/total_loss", save_last=True),
             LearningRateMonitor(logging_interval="step"),
             LogImageCallback(config["data"]["validation"]["dataset"], n_epochs=5)
         ]
