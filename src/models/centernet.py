@@ -348,7 +348,8 @@ class CenterNet(pl.LightningModule):
                             x2 = box[2] * img_w
                             y2 = box[3] * img_h
 
-                            line = f"{frame+i+1}, {track_id}, {x1+1}, {y1+1}, {x2-x1}, {y2-y1}, -1, -1, -1, -1\n"
+                            # MOT challenge format uses 1-based indexing
+                            line = f"{frame+i+1},{track_id+1},{x1+1},{y1+1},{x2-x1},{y2-y1},-1,-1,-1,-1\n"
                             f.write(line)
                             
             if save_images:
