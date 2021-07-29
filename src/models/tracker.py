@@ -1,5 +1,3 @@
-import time
-import os
 from typing import List
 
 import numpy as np
@@ -7,9 +5,6 @@ import torch
 from torch import nn
 from torchvision.ops import box_iou, generalized_box_iou
 from scipy.optimize import linear_sum_assignment
-import cv2
-
-from ..utils.image_annotate import revert_imagenet_normalization , draw_bboxes
 
 torch.backends.cudnn.benchmark = True
 
@@ -56,6 +51,8 @@ class Tracker:
     def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.9):
         model.eval()
         self.model = model
+
+        # hparams
         self.device = device
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
@@ -64,6 +61,7 @@ class Tracker:
         self.matching_cost = matching_cost if matching_cost is not None else MatchingCost(reid_weight=1, box_weight=0)
         self.smoothing_factor = smoothing_factor
 
+        # state variables
         self.frame = 0
         self.next_track_id = 0
         self.tracks: List[Track] = []
@@ -74,7 +72,7 @@ class Tracker:
         self.tracks = []
 
     @torch.no_grad()
-    def step_batch(self, images: torch.Tensor, output_dir=None, **kwargs):
+    def step_batch(self, images: torch.Tensor, **kwargs):
         """
 
         Args
@@ -88,52 +86,34 @@ class Tracker:
         # forward pass
         self.model.eval()
         self.model.to(device)
-        if output_dir is not None:
-            images_np = images.cpu().numpy().transpose(0,2,3,1)
-            images_np = np.ascontiguousarray(images_np)
-            images_np = revert_imagenet_normalization(images_np)
         
         images = images.to(device)
-
-        time0 = time.time()
         heatmap, box_2d, reid = self.model(images)
-        model_time = time.time() - time0
 
-        time0 = time.time()
         # gather new detections and their embeddings
         new_detections = self.model.decode_tracking(heatmap, box_2d, reid, nms_kernel=nms_kernel, num_detections=num_detections, normalize_bbox=True)
-        decode_time = time.time() - time0
 
-        time0 = time.time()
+        out = {"bboxes": [], "track_ids": []}
         for b in range(images.shape[0]):
             bboxes = new_detections["bboxes"][b]
             labels = new_detections["labels"][b]
             scores = new_detections["scores"][b]
             embeddings = new_detections["embeddings"][b]
-            self.update(bboxes, labels, scores, embeddings, **kwargs)
-
-            if output_dir is not None:
-                bboxes = np.stack([x.bbox.cpu().numpy() for x in self.tracks if x.active], axis=0)
-                track_ids = np.stack([x.track_id for x in self.tracks if x.active], axis=0)
-                img = images_np[b]
-                save_path = os.path.join(output_dir, f"{self.frame}.jpg")
-
-                draw_bboxes(img, bboxes, track_ids, normalized_bbox=True, text_color=(1,1,1))
-                img = (img*255).astype(np.uint8)
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-                assert cv2.imwrite(save_path, img)
-
+            self.update(bboxes, labels, scores, embeddings, **kwargs)    
             self.frame += 1
-        
-        matching_time = time.time() - time0
 
-        return model_time, decode_time, matching_time
+            track_bboxes = [x.bbox.cpu().clone().numpy() for x in self.tracks]
+            track_ids = [x.track_id for x in self.tracks]
+            out["bboxes"].append(track_bboxes)
+            out["track_ids"].append(track_ids)
+            
+        return out
 
     @torch.no_grad()
     def step_single(self, img: torch.Tensor, **kwargs):
-        img = img.unsqueeze(0)
-        return self.step_batch(img, **kwargs)
+        img = img.unsqueeze(0)                  # add batch dim
+        track_bboxes, track_ids = self.step_batch(img, **kwargs)
+        return track_bboxes[0], track_ids[0]    # remove batch dim
 
     def update(self, bboxes, labels, scores, embeddings, **kwargs):
         detection_threshold = kwargs.get("detection_threshold", self.detection_threshold)
@@ -152,6 +132,7 @@ class Tracker:
             current_embeddings = torch.stack([x.embedding for x in self.tracks], dim=0)
             current_bboxes = torch.stack([x.bbox for x in self.tracks], dim=0)
         else:
+            # must have at least 1 element to calculate cost matrix and run linear sum assignment
             embedding_dim = embeddings.shape[-1]
             current_embeddings = torch.zeros((1,embedding_dim), device=device)
             current_bboxes = torch.zeros((1,4), device=device)

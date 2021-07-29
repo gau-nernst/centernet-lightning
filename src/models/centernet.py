@@ -13,13 +13,14 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 import wandb
 from tqdm import tqdm
+import cv2
 
 from .backbones import build_backbone
 from .necks import build_neck
 from .heads import build_output_heads
 from .tracker import MatchingCost, Tracker
 from ..datasets import InferenceDataset
-from ..utils import load_config
+from ..utils import load_config, draw_bboxes
 from ..eval import detections_to_coco_results
 
 _output_templates = {
@@ -299,7 +300,7 @@ class CenterNet(pl.LightningModule):
         return all_detections
 
     @torch.no_grad()
-    def inference_tracking(self, data_dir, save_dir):
+    def inference_tracking(self, data_dir, batch_size=4, save_dir=None, save_results=False, save_images=False):
         matching_cost = MatchingCost(reid_weight=1, box_weight=0)
         tracker = Tracker(self, device=self.device, detection_threshold=0.3, num_detections=300, matching_cost=matching_cost, smoothing_factor=0.5)
 
@@ -309,26 +310,56 @@ class CenterNet(pl.LightningModule):
             ToTensorV2(),
         ])
         dataset = InferenceDataset(data_dir, transforms=transforms)
-        dataloader = DataLoader(dataset, batch_size=16, num_workers=8, shuffle=False, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=8, shuffle=False, pin_memory=True)
 
-        os.makedirs(save_dir, exist_ok=True)
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            results_path = os.path.join(save_dir, "tracking_results.txt")
+            images_dir = os.path.join(save_dir, "images")
+            if save_results:
+                if os.path.exists(results_path):
+                    os.remove(results_path)
+            if save_images:
+                os.makedirs(images_dir, exist_ok=True)
 
-        total_model = 0
-        total_decode = 0
-        total_matching = 0
+        elif save_results or save_images:
+            warnings.warn("save_dir is not specified. results and images won't be saved")
+            save_results = False
+            save_images = False
 
         self.eval()
-        for images in tqdm(dataloader):
-            model_time, decode_time, matching_time = tracker.step_batch(images["image"], output_dir=save_dir)
+        frame = 0
+        for batch in tqdm(dataloader):
+            img_paths = batch["image_path"]
+            img_widths = batch["original_width"].clone().numpy()
+            img_heights = batch["original_height"].clone().numpy()
+            
+            out = tracker.step_batch(batch["image"])
+            track_bboxes = out["bboxes"]
+            track_ids = out["track_ids"]
 
-            total_model += model_time
-            total_decode += decode_time
-            total_matching += matching_time
+            # write tracking results to file
+            if save_results:
+                with open(os.path.join(save_dir, "tracking_results.txt"), "a") as f:
+                    for i, (frame_bboxes, frame_track_ids, img_w, img_h) in enumerate(zip(track_bboxes, track_ids, img_widths, img_heights)):
+                        for box, track_id in zip(frame_bboxes, frame_track_ids):
+                            x1 = box[0] * img_w
+                            y1 = box[1] * img_h
+                            x2 = box[2] * img_w
+                            y2 = box[3] * img_h
 
-        total_time = total_model + total_decode + total_matching
-        print("Model time", total_model, total_model/total_time, sep="\t")
-        print("Decode time", total_decode, total_decode/total_time, sep="\t")
-        print("Matching time", total_matching, total_matching/total_time, sep="\t")
+                            line = f"{frame+i+1}, {track_id}, {x1+1}, {y1+1}, {x2-x1}, {y2-y1}, -1, -1, -1, -1\n"
+                            f.write(line)
+                            
+            if save_images:
+                for i, (frame_bboxes, frame_track_ids, img_p) in enumerate(zip(track_bboxes, track_ids, img_paths)):
+                    img = cv2.imread(img_p)
+                    draw_bboxes(img, frame_bboxes, frame_track_ids, normalized_bbox=True, text_color=(255,255,255))
+                    
+                    save_img_path = os.path.join(images_dir, f"{frame+i}.jpg")
+                    cv2.imwrite(save_img_path, img)
+
+            frame += len(track_ids)
 
     # allow loading checkpoint with mismatch weights
     # https://github.com/PyTorchLightning/pytorch-lightning/issues/4690#issuecomment-731152036
