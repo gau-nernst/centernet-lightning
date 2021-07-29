@@ -32,18 +32,7 @@ def revert_imagenet_normalization(img):
     img = img * std + mean
     return img
 
-def draw_bboxes(
-    img: np.ndarray,
-    bboxes: np.ndarray,
-    labels: np.ndarray,
-    scores: np.ndarray = None,
-    score_threshold: float = 0,
-    inplace: bool = True,
-    normalized_bbox: bool = False,
-    color: Tuple[int] = (255,0,0),
-    text_color: Tuple[int] = (0,0,0),
-    font: int = cv2.FONT_HERSHEY_PLAIN
-    ):
+def draw_bboxes(img: np.ndarray, bboxes, labels, scores=None, score_threshold=0, inplace=True, normalized_bbox=False, color=(255,0,0), text_color=(0,0,0), font=cv2.FONT_HERSHEY_PLAIN):
     """Draw bounding boxes on an image using `cv2`
     
     Args:
@@ -65,17 +54,25 @@ def draw_bboxes(
         img = img.copy()
 
     if normalized_bbox:
-        bboxes = bboxes.copy()
-        bboxes[:,[0,2]] *= img.shape[1]
-        bboxes[:,[1,3]] *= img.shape[0]
-    bboxes = bboxes.astype(int)
+        img_height, img_width = img.shape[:2]
+        new_bboxes = []
+        for box in bboxes:
+            x1 = int(box[0]*img_width)
+            y1 = int(box[1]*img_height)
+            x2 = int(box[2]*img_width)
+            y2 = int(box[3]*img_height)
+            new_bboxes.append([x1,y1,x2,y2])
+        bboxes = new_bboxes
+    
+    else:
+        bboxes = [[int(x) for x in box] for box in bboxes]
 
-    for i in range(bboxes.shape[0]):
+    for i in range(len(bboxes)):
         if scores is not None and scores[i] < score_threshold:
             continue
         
-        pt1 = bboxes[i,:2]
-        pt2 = bboxes[i,2:]
+        pt1 = bboxes[i][:2]
+        pt2 = bboxes[i][2:]
         label = labels[i] if isinstance(labels[i], str) else int(labels[i])
         text = f"{label}" if scores is None else f"{label} {scores[i]:.2f}"
 
