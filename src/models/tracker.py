@@ -102,8 +102,8 @@ class Tracker:
             self.update(bboxes, labels, scores, embeddings, **kwargs)    
             self.frame += 1
 
-            track_bboxes = [x.bbox.cpu().clone().numpy() for x in self.tracks]
-            track_ids = [x.track_id for x in self.tracks]
+            track_bboxes = [x.bbox.cpu().clone().numpy() for x in self.tracks if x.active]
+            track_ids = [x.track_id for x in self.tracks if x.active]
             out["bboxes"].append(track_bboxes)
             out["track_ids"].append(track_ids)
             
