@@ -61,6 +61,10 @@ class MOTTrackingSequence(Dataset):
         self.num_tracks = 0
         self.sequence = [{"ids": [], "labels": [], "bboxes": []} for _ in range(self.seq_length)]
         for line in annotations:
+            # skip non-person objects
+            if int(line[6]) == 0:
+                continue
+
             # frame, id, and xy are 1-index
             frame = int(line[0])
             track_id = int(line[1])
