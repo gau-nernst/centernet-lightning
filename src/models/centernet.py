@@ -20,8 +20,8 @@ from .necks import build_neck
 from .heads import build_output_heads
 from .tracker import MatchingCost, Tracker
 from ..datasets import InferenceDataset
-from ..utils import load_config, draw_bboxes
-from ..eval import detections_to_coco_results
+from ..utils import load_config, draw_bboxes, convert_cxcywh_to_xywh, convert_x1y1x2y2_to_xywh
+from ..eval import detections_to_coco_results, evaluate_coco_detection
 
 _output_templates = {
     "detection": namedtuple("Detection", "heatmap box_2d"),
@@ -100,20 +100,64 @@ class CenterNet(pl.LightningModule):
 
         return losses["total"]
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx): 
         encoded_outputs = self.get_encoded_outputs(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch, ignore_reid=True)    # during validation, only evaluate detection loss
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
-        # TODO: evaluation
-
-    def get_steps_per_epoch(self):
-        # does not consider multi-gpu training
-        if self.trainer.max_steps:
-            return self.trainer.max_steps
         
+        if self.task == "tracking":
+            return
+
+        # gather detections for evaluation
+        mask = batch["mask"].cpu().numpy()
+        if self.task == "detection":
+            target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
+            target_labels = [label[m.astype(bool)] for label, m in zip(batch["labels"].cpu().numpy(), mask)]
+            target_detections = {"bboxes": target_bboxes, "labels": target_labels}      # list of 1-d np array of different lengths
+            
+            pred_detections = self.decode_detection(torch.sigmoid(encoded_outputs["heatmap"]), encoded_outputs["box_2d"], normalize_bbox=True)
+            pred_detections = {k: v.cpu().numpy() for k,v in pred_detections.items()}   # 2-d np array with dim batch_size x num_detections (100)
+            pred_detections["bboxes"] = convert_x1y1x2y2_to_xywh(pred_detections["bboxes"])
+        
+        elif self.task == "tracking":
+            pass
+        
+        return pred_detections, target_detections
+
+    def validation_epoch_end(self, outputs):
+        if self.task == "tracking":
+            return
+        
+        preds = {key: [] for key in outputs[0][0]}
+        target = {key: [] for key in outputs[0][1]}
+
+        for (pred_detections, target_detections) in outputs:
+            for key in preds:
+                preds[key].extend(pred_detections[key])
+            for key in target:
+                target[key].extend(target_detections[key])
+        
+        if self.task == "detection":
+            metrics = evaluate_coco_detection(
+                preds["bboxes"], preds["labels"], preds["scores"], 
+                target["bboxes"], target["labels"],
+                metrics_to_return=("AP", "AP50", "AP75")
+            )
+        elif self.task == "tracking":
+            pass
+        
+        for metric, value in metrics.items():
+            self.log(f"val/{metric}", value)
+
+    # https://github.com/PyTorchLightning/pytorch-lightning/issues/5449#issuecomment-774265729
+    def get_steps_per_epoch(self):
         if self._steps_per_epoch is None:
-            self._steps_per_epoch = len(self.train_dataloader()) // self.trainer.accumulate_grad_batches
+            num_devices = max(1, self.trainer.num_gpus, self.trainer.num_processes)
+            if self.trainer.tpu_cores:
+                num_devices = max(num_devices, self.trainer.tpu_cores)
+            
+            self._steps_per_epoch = len(self.train_dataloader()) // (num_devices * self.trainer.accumulate_grad_batches)
         
         return self._steps_per_epoch
 
