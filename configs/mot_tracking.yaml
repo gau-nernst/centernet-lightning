@@ -1,9 +1,11 @@
 model:
   task: tracking
+  load_from_checkpoint: wandb/run-20210722_110035-16i29xpr/files/crowdhuman_tracking/16i29xpr/checkpoints/epoch=59-step=11279.ckpt
 
   backbone:
     name: resnet34
     pretrained: True
+    frozen_stages: 4
   
   neck:
     name: fpn
@@ -31,16 +33,16 @@ model:
       loss_weight: 1
 
   optimizer:
-    name: Adam
+    name: SGD
     params:
-      lr: 0.0001
-      # momentum: 0.9
+      lr: 0.001
+      momentum: 0.9
       weight_decay: 0.0001
 
   lr_scheduler:
     name: OneCycleLR
     params:
-      max_lr: 0.0001
+      max_lr: 0.001
 
 data:
   train:
@@ -58,23 +60,28 @@ data:
       - MOT20-05    # 3315
 
       transforms:
-        HorizontalFlip:
-          p: 0.5
-        Affine:
-          scale: [0.8, 1.25]
-          rotate: [-10, 10]
-        RandomResizedCrop:
-          width: 1088
-          height: 608
-        ColorJitter:
-          brightness: 0.4
-          contrast: 0.4
-          saturation: 0.4
-        Cutout:
-          num_holes: 10
-          max_w_size: 60
-          max_h_size: 60
-  
+        - name: HorizontalFlip
+          params:
+            p: 0.5
+        - name: Affine
+          params:
+            scale: [0.8, 1.25]
+            rotate: [-10, 10]
+        - name: RandomResizedCrop
+          params:
+            width: 1088
+            height: 608
+        - name: ColorJitter
+          params:
+            brightness: 0.4
+            contrast: 0.4
+            saturation: 0.4
+        - name: Cutout
+          params:
+            num_holes: 10
+            max_w_size: 60
+            max_h_size: 60
+    
     dataloader:
       batch_size: 16
       num_workers: 8
@@ -91,10 +98,11 @@ data:
       - MOT20-01    # 429
       
       transforms:
-        Resize:
-          width: 1088
-          height: 608
-    
+        - name: Resize
+          params:
+            width: 1088
+            height: 608
+      
     dataloader:
       batch_size: 16
       num_workers: 8
@@ -104,13 +112,28 @@ data:
 trainer:
   gpus: 1
   precision: 16
-  max_epochs: 30
+  max_epochs: 10
   val_check_interval: 1.0
   benchmark: True
   gradient_clip_val: 35
 
-logger:
-  name: wandb         # tensorboard or wandb
-  params:
-    project: mot
-    log_model: True
+  logger:
+    name: WandbLogger
+    params:
+      project: mot
+      log_model: True
+
+  callbacks:
+    - name: ModelCheckpoint
+      params:
+        monitor: val/total_loss
+        save_last: True
+
+    - name: LearningRateMonitor
+      params:
+        logging_interval: step
+    
+    - name: LogImageCallback
+      params:
+        n_epochs: 5
+        random: True

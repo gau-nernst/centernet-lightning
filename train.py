@@ -1,10 +1,12 @@
-import warnings
+import os
 from typing import Dict, Union
 import argparse
+from copy import deepcopy
+from functools import partial
 
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+import pytorch_lightning.loggers as pl_loggers
+import pytorch_lightning.callbacks as pl_callbacks
 import wandb
 
 from src.models import build_centernet
@@ -26,36 +28,47 @@ def train(config: Union[str, Dict]):
     train_dataloader = build_dataloader(config["data"]["train"])
     val_dataloader = build_dataloader(config["data"]["validation"])
 
-    logger = parse_logger_config(config["logger"], model) if "logger" in config else True
+    logger_mapper = pl_loggers.__dict__
+    callback_mapper = {**pl_callbacks.__dict__, "LogImageCallback": partial(LogImageCallback, config["data"]["validation"]["dataset"])}
 
-    trainer = pl.Trainer(
-        **config["trainer"],
-        logger=logger,
-        callbacks=[
-            ModelCheckpoint(monitor="val/total_loss", save_last=True),
-            LearningRateMonitor(logging_interval="step"),
-            LogImageCallback(config["data"]["validation"]["dataset"], n_epochs=5)
-        ]
-    )
+    trainer_config = parse_trainer_config(config["trainer"], logger_mapper, callback_mapper)
+    trainer_config["logger"].log_hyperparams({"data": config["data"], "trainer": config["trainer"]})
+    if isinstance(trainer_config["logger"], pl_loggers.WandbLogger):
+        trainer_config["logger"].experiment.watch(model, log="all", log_graph=True)
     
+
+    trainer = pl.Trainer(**trainer_config)
+
     trainer.fit(model, train_dataloader, val_dataloader)
     wandb.finish()
 
-def parse_logger_config(logger_cfg, model):
-    logger_name = logger_cfg["name"]
+def parse_trainer_config(trainer_cfg, logger_mapper, callback_mapper):
+    config = deepcopy(trainer_cfg)
 
-    if logger_name == "wandb":
-        logger = WandbLogger(**logger_cfg["params"])
-        logger.watch(model)
-    
-    elif logger_name == "tensorboard":
-        logger = TensorBoardLogger(**logger_cfg["params"])
-
+    # parse logger
+    if "logger" in config:
+        logger_config = config["logger"]
+        logger = logger_mapper[logger_config["name"]](**logger_config["params"])
     else:
-        warnings.warn(f'{logger_name} is not supported. Using default Lightning logger (tensorboard)')
-        logger = True
+        save_dir = os.getcwd()
+        name = "lightning_logs"
+        log_path = os.path.join(save_dir, name)
+        version = len(os.listdir(log_path))+1 if os.path.exists(log_path) else 1
+
+        logger = pl_loggers.TensorBoardLogger(save_dir=save_dir, version=version, name=name, log_graph=True)
+    config["logger"] = logger
+
+    # parse callbacks
+    if "callbacks" in config:
+        callbacks = []
+        for callback_config in config["callbacks"]:
+            item = callback_mapper[callback_config["name"]](**callback_config["params"])
+            callbacks.append(item)
+    else:
+        callbacks = None
+    config["callbacks"] = callbacks
     
-    return logger
+    return config
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train CenterNet from a config file")

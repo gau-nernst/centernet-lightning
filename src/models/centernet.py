@@ -48,6 +48,7 @@ class CenterNet(pl.LightningModule):
 
         self.save_hyperparameters()
         self._steps_per_epoch = None
+        self.example_input_array = torch.rand((1,3,512,512))    # for model logging
 
     def forward(self, x):
         """Return encoded outputs. Use namedtuple to support TorchScript and ONNX export. Heatmap is after sigmoid

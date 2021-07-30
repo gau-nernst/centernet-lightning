@@ -45,8 +45,8 @@ def build_dataloader(config):
 
 def parse_transforms(config: Dict[str, Dict], format="yolo", task="detection"):
     transforms = []
-    for name, params in config.items():
-        t = A.__dict__[name](**params)
+    for t_config in config:
+        t = A.__dict__[t_config["name"]](**t_config["params"])
         transforms.append(t)
 
     transforms.append(A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255))

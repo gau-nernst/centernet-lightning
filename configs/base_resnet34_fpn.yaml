@@ -3,13 +3,13 @@ model:
   backbone:
     name: resnet34
     pretrained: True
-    input_channels: 3
 
   neck:
     name: fpn    # simple or fpn
     upsample_channels: [256, 128, 64]
-    upsample_type: nearest   # conv_transpose, bilinear, nearest
+    upsample_type: nearest    # conv_transpose, bilinear, nearest
     conv_type: normal         # normal, separable, dcn
+    weighted_fusion: False    # True or False
       
   output_heads:
     heatmap:
@@ -20,9 +20,9 @@ model:
       loss_weight: 1
 
     box_2d:
-      init_bias: 0
-      loss_function: l1       # iou, giou, l1, or smooth_l1
-      loss_weight: 0.1
+      init_bias: 10
+      loss_function: giou       # iou, giou, l1, or smooth_l1
+      loss_weight: 5
 
   optimizer:           # mmdetection
     name: SGD          # any optimizers from torch.optim
@@ -48,15 +48,18 @@ data:
       # https://github.com/xingyizhou/CenterNet/blob/master/src/lib/utils/image.py#L222
       # they also used PCA augmentation, but didn't mention in their paper
       transforms:
-        HorizontalFlip:
-          p: 0.5
-        RandomResizedCrop:
-          height: 512
-          width: 512
-        ColorJitter:
-          brightness: 0.4
-          contrast: 0.4
-          saturation: 0.4
+        - name: HorizontalFlip
+          params:
+            p: 0.5
+        - name: RandomResizedCrop
+          params:
+            height: 512
+            width: 512
+        - name: ColorJitter
+          params:
+            brightness: 0.4
+            contrast: 0.4
+            saturation: 0.4
   
     dataloader:
       batch_size: 32
@@ -71,9 +74,10 @@ data:
       split: val2017
 
       transforms:
-        Resize:
-          height: 512
-          width: 512
+        - name: Resize
+          params:
+            width: 512
+            height: 512
     
     dataloader:
       batch_size: 32
@@ -85,13 +89,27 @@ data:
 trainer:
   gpus: 1
   precision: 16
-  max_epochs: 140
+  max_epochs: 5
   val_check_interval: 1.0
   benchmark: True
   gradient_clip_val: 35     # mmdetection
 
-# logger:
-#   name: wandb         # tensorboard or wandb
-#   params:
-#     project: helmet
-#     log_model: True
+  # logger:
+  #   name: WandbLogger     # PyTorch Lightning logger e.g. TensorboardLogger, WandbLogger
+  #   params:
+  #     project: detection
+  #     log_model: True
+
+  callbacks:
+    - name: ModelCheckpoint
+      params:
+        monitor: val/total_loss
+        save_last: True
+
+    - name: LearningRateMonitor
+      params:
+        logging_interval: step
+    
+    - name: LogImageCallback
+      params:
+        n_epochs: 5

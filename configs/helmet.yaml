@@ -1,0 +1,59 @@
+__base__: "base_resnet34.yaml"
+
+model:
+  backbone:
+    name: mobilenet_v2
+    pretrained: True
+
+  output_heads:
+    heatmap:
+      num_classes: 2
+
+    box_2d:
+      init_bias: 10
+      loss_function: giou
+      loss_weight: 5
+
+data:
+  train:
+    dataset:
+      type: voc
+      data_dir: datasets/VOC2028/
+      split: train
+      name_to_label: &helmet_name_to_label
+        person: 0
+        hat: 1
+
+      transforms:
+        - name: HorizontalFlip
+          params:
+            p: 0.5
+        - name: RandomResizedCrop
+          params:
+            height: 512
+            width: 512
+        - name: ColorJitter
+          params:
+            brightness: 0.4
+            contrast: 0.4
+            saturation: 0.4
+
+    dataloader:
+      batch_size: 32
+
+  validation:
+    dataset:
+      type: voc
+      data_dir: datasets/VOC2028/
+      split: val
+      name_to_label: *helmet_name_to_label
+
+    dataloader:
+      batch_size: 32
+
+trainer:
+  logger:
+    name: WandbLogger
+    params:
+      project: helmet
+      log_model: True
