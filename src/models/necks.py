@@ -146,7 +146,12 @@ class FPNNeck(nn.Module):
         self.skip_connections = nn.ModuleList()
         self.up_layers = nn.ModuleList()
         self.conv_layers = nn.ModuleList()
-        self.weights = nn.ParameterList() if weighted_fusion else None
+        if weighted_fusion:
+            # indexing ParameterList of scalars might be slightly faster than indexing Parameter of 1-d tensor
+            self.weights = [nn.Parameter(torch.tensor(1., dtype=torch.float32, requires_grad=True)) for _ in range(len(upsample_channels))]
+            self.weights = nn.ParameterList(self.weights)
+        else:
+            self.weights = None
 
         for i in range(len(upsample_channels)):
             # build skip connections
@@ -163,12 +168,6 @@ class FPNNeck(nn.Module):
             out_conv_channels = upsample_channels[i+1] if i < len(upsample_channels)-1 else upsample_channels[-1]
             conv = _make_conv(out_channels, out_conv_channels, conv_type=conv_type, **kwargs)
             self.conv_layers.append(conv)
-
-            # build fusion weight
-            if weighted_fusion:
-                fusion_w = nn.Parameter(torch.tensor(1.))
-                fusion_w.requires_grad = weighted_fusion
-                self.weights.append(fusion_w)
 
         self.out_channels = upsample_channels[-1]
         self.upsample_stride = 2**len(upsample_channels)
