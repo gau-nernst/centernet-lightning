@@ -23,7 +23,7 @@ def get_default_transforms(resize_height=512, resize_width=512, box_format="yolo
 def get_default_detection_transforms(box_format="yolo"):
     """ImageNet normalization and resize to 512 x 512
     """
-    transforms = get_default_transforms(resize_height=515, resize_width=512, box_format=box_format, label_fields=["labels"])
+    transforms = get_default_transforms(resize_height=512, resize_width=512, box_format=box_format, label_fields=["labels"])
     return transforms
 
 def get_default_tracking_transforms(box_format="yolo"):

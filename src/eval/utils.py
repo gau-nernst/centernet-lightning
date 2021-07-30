@@ -91,7 +91,7 @@ def detections_to_coco_results(image_ids, bboxes, labels, scores, save_path, sco
 
             item = {
                 "image_id": img_id,
-                "category_id": label,
+                "category_id": int(label),
                 "bbox": box,
                 "score": score
             }
