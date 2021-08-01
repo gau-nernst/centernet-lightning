@@ -1,6 +1,6 @@
 # CenterNet
 
-Built with PyTorch Lightning, support TorchScript and ONNX support, modular design to make it simple to swap backbones and necks.
+CenterNet is a strong single-stage, single-scale, and anchor-free object detector. This implementation is built with PyTorch Lightning, supports TorchScript and ONNX export, and has modular design to make it simple customizing the components.
 
 References
 
@@ -12,50 +12,16 @@ References
 
 ## Install
 
-Main dependencies
-
-- pytorch, torchvision
-- numpy
-- opencv-python
-- pytorch-lightning
-- pycocotools (to read COCO dataset. Cython is required. Use [gautamchitnis](https://github.com/gautamchitnis/cocoapi) fork to support Windows)
-- albumentations (for augmentations during training)
-
-Other dependencies
-
-- ipykernel (to use with Jupyter)
-- pytest (for unit testing, not required to run)
-- wandb (for Weights and Biases logging, not required to run)
-
-Environment tested: Windows 10 and Linux (Ubuntu), python=3.8, pytorch=1.8.1, torchvision=0.9.1, cudatoolkit=11.1
-
-### Install with conda
-
-Create new environment
+You can use the following commands to install the required dependencies.
 
 ```bash
-conda env create -n centernet python=3.8
-conda activate centernet
-```
-
-Install pytorch. Follow the official installation instruction [here](https://pytorch.org/)
-
-```bash
-conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c nvidia
-```
-
-In Windows, replace `-c nvidia` with `-c conda-forge`. If you don't have NVIDIA GPU or don't need GPU support, remove `cudatoolkit=11.1` and `-c nvidia`.
-
-Install other dependencies
-
-```bash
-pip install cython pytorch-lightning opencv-python
-pip install -U albumentations --no-binary imgaug,albumentations
+conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c conda-forge
+pip install cython pytorch-lightning opencv-python albumentations
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
-
-# optional packages
-pip install ipykernel pytest wandb
+pip install git+https://github.com/gau-nernst/TrackEval.git
 ```
+
+For more information, see [install.md](docs/install.md)
 
 ## Usage
 
@@ -147,132 +113,19 @@ model.to_onnx("model.onnx", torch.rand((1,3,512,512)))      # export to ONNX
 model.to_torchscript("model.pt")                            # export to TorchScript
 ```
 
-## Model architecture
+## Training CenterNet
 
-CenterNet consists of 3 main components
-
-- Backbone: any CNN classifier e.g. ResNet-50, MobileNet v2
-- Neck: upsample the last CNN output, and may perform feature map fusion e.g. FPN
-- Output head: final outputs for a particular task e.g. heatmap and box regression for object detection
-
-Since CenterNet performs single-scale detection, feature map fusion is very important to achieve good performance. It is possible to extend CenterNet to multi-scale, but that will require more complicated target sampling and potentially slower inference speed.
-
-Backbones:
-
-- [x] `ResNetBackbone`: from torchvision e.g. ResNet-18/34/50
-- [x] `MobileNetBackbone`: from torchvision e.g. MobileNet v2/v2
-- [ ] `TimmBackbone`: a thin wrapper around [timm](https://github.com/rwightman/pytorch-image-models) to access Ross Wightman models
-
-```python
-from src.models import ResNetBackbone
-
-backbone = ResNetBackbone("resnet18")
-```
-
-Necks:
-
-- [x] `SimpleNeck`: upsample the backbone output. This is used in the original CenterNet ResNet
-- [x] `FPNNeck`: upsample the backbone output, and fuse with high-resolution, intermediate feature maps from backbone
-- [ ] `BiFPNNeck`: not implemented. This is an upgraded version of FPN, introduced in the EfficientDet paper. CenterNet2 also uses this new backbone
-
-```python
-from src.models import SimpleNeck
-
-neck = SimpleNeck([2048])       # last channel of the backbone
-```
-
-Output heads:
-
-- [x] `heatmap`: compulsory, class scores at each output position
-- [x] `box_2d`: bounding box regression, predicting left, top, right, bottom distance from the heatmap location
-- [ ] `time_displacement`: for tracking (CenterTrack)
-
-```python
-from src.models import HeatmapHead
-
-head = HeatmapHead(64, 2)       # last channel of neck and number of classes
-```
-
-Since the model is built entirely from a config file, you can use the config file to customize model's hyperparameters. Not all hyperparameters are customizable. Check the sample config files to see what is customizable.
-
-### The `CenterNet` class
-
-The `CenterNet` class is a Lightning Module. Key methods:
-
-- `__init__()`: constructor to build the network from hyperparameters. Pass in a config dictionary, or use the helper function `build_centernet()`
-- `get_encoded_outputs()`: forward pass through the network, return a dictionary. Heatmap output is before sigmoid. This is used for computing loss
-- `forward()`: forward pass through the network, but return a namedtuple to make the model export-friendly. Heatmap output is after sigmoid
-- `compute_loss()`: pass in the encoded outputs to calculate losses for each output head and total loss
-- `decode_detections()`: pass in the encoded outputs to decode to bboxes, labels, and scores predictions
-
-## Training
-
-It is recommended to train the model with the train script `train.py` to train with a config file.
+You can train CenterNet with the provided train script `train.py` and a config file.
 
 ```bash
 python train.py --config "configs/coco_resnet34.yaml"
 ```
 
-You can also import the `train()` function from the train script to train in your own script. You can either pass in path to your config file, or pass in a config dictionary directly.
-
-```python
-from train import train
-from src.utils import load_config
-
-# train with config file
-train("config_file.yaml")
-
-# train with config dictionary. you can modify dict values directly
-config = load_config("config_file.yaml")
-config["model"]["backbone"]["name"] = "resnet50"
-config["trainer"]["max_epochs"] = 10
-train(config)
-```
-
-The config file specifies everything required to train the model, including model construction, dataset, augmentations and training schedule.
-
-### Custom model architecture
-
-You can modify the backbone, neck, and output heads in their own section in the config file
-
-### Custom dataset
-
-Datasets in COCO and Pascal VOC formats are supported. See the Datasets section below to ensure your folder structure is correct. Change `data_dir` and `split` accordingly. For Pascal VOC, you also need to specify `name_to_label` to map class name to class label (number)
-
-### Custom augmentations
-
-Currently Albumentation is used to do augmentation. Any Albumentation transformations are supported. To specify a new augmentation, simply add to the list `transforms` under each dataset
-
-### Custom trainer
-
-This repo uses PyTorch Lightning, so we have all the PyTorch Lightning benefits. Specify any parameters you want to pass to the `trainer` in the config file to specify the training details. For a full list of option, refer to [Lightning documentation](https://pytorch-lightning.readthedocs.io/en/stable/common/trainer.html)
-
-- Training epochs: Change `max_epochs`
-- Multi-GPU training (not tested): Change `gpus`
-- Mixed-precision training: Change `precision` to 16
-
-### Custom optimizer and learning rate scheduler
-
-Change `optimizer` and `lr_scheduler` under `model`. Only optimizers and schedulers from the official PyTorch is supported (in `torch.optim`). Not all schedulers will work, since they require extra information about training schedule. To use other optimizers, modify the `configure_optimizers()` method of the class `CenterNet`
-
-### Manual training
-
-Since `CenterNet` is a Lightning module, you can train it like any other Lightning module. Consult PyTorch Lightning documentation for more information.
-
-```python
-import pytorch_lightning as pl
-
-model = ...     # create a model as above
-
-trainer = pl.Trainer(
-    gpus=1,
-    max_epochs=10,
-)
-
-trainer.fit(model, train_dataloader, val_dataloader)
-```
+See sample config files at [config/](config/). To customize training, see [training.md](docs/training)
 
 ## Datasets
+
+The following dataset formats are supported:
 
 Detection:
 
@@ -285,134 +138,7 @@ Tracking:
 - [x] (MOT)[https://motchallenge.net/]
 - [x] (KITTI Tracking)[http://www.cvlibs.net/datasets/kitti/eval_tracking.php]
 
-Most Object Detection datasets are in COCO or Pascal VOC format. Any other datasets not mentioned above but have the same format will also work. There is also `InferenceDataset` class for simple inference.
-
-### Dataset and dataloader builder
-
-WIP
-
-### Detection datasets
-
-#### COCO
-
-For COCO dataset and others in COCO format, make sure you have the following folder structure:
-
-```bash
-COCO_root
-├── annotations/
-│   ├── instances_val2017.json
-│   ├── instances_train2017.json
-│   ├── ...
-├── images/
-│   ├── val2017/
-│   ├── train2017/
-│   ├── ...
-```
-
-To create a COCO dataset:
-
-```python
-from src.datasets import COCODataset
-
-dataset = COCODataset("COCO_root", "val2017")
-```
-
-#### Pascal VOC
-
-Folder structure:
-
-```bash
-VOC_root
-├── Annotations/
-│   ├── 00001.xml
-│   ├── 00002.xml
-│   ├── ...
-├── ImageSets/
-│   ├── Main/
-│       ├── train.txt
-│       ├── val.txt
-│       ├── ...
-├── JPEGImages/
-│   ├── 00001.jpg
-│   ├── 00002.jpg
-│   ├── ...
-```
-
-All images inside the `JPEGImages` folder must have file extension `.jpg`. All annotation files inside the `Annotations` folder must have file extension `.xml`. Dataset splits inside `ImageSets/Main` folder must have file extension `.txt`. The names inside a dataset split file (e.g. `train.txt`) is a list of names without file extension, separated by a line break character.
-
-```python
-from src.datasets import VOCDataset
-
-name_to_label = {
-    "person": 0,
-    "table": 1,
-    ...
-}
-dataset = VOCDataset("VOC_root", "train", name_to_label=name_to_label)
-```
-
-`name_to_label` is optional, but required for training. Since annotation files only contain the string names (e.g. `person` or `car`), you need to map them to integer labels for training.
-
-#### CrowdHuman
-
-### Tracking datasets
-
-#### MOT
-
-#### KITTI Tracking
-
-### Inference dataset
-
-```python
-from src.datasets import InferenceDataset
-
-dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"], resize_height=512, resize_width=512)
-
-# dataset[0] = {
-#   "image_path": full path to the image
-#   "image": image tensor in CHW format
-#   "original_width": original image width, to convert bboxes if needed
-#   "original_height": same as above
-# }
-```
-
-- `img_names` is optional. if not provided, the dataset will use all JPEG images found in the folder `img_dir`.
-- `resize_height` and `resize_width`: image dimensions when input to the model. Default to 512x512, the resolution 
-
-Inference dataset does not need a custom collate function. You can create a data loader directly from an inference dataset instance.
-
-### Custom dataset for training
-
-You can write your own custom dataset, as long as it conforms to the format that the model expects. A batch of input data should be a dictionary with the following key-value pairs:
-
-- `image`: images in `CHW` format. Shape `NCHW`.
-- `bboxes`: bounding boxes in `(cx,cy,w,h)` format (unit: pixel). Shape `ND4`, where `D` is the number of detections in one image.
-- `labels`: labels `[0,num_classes-1]`. Shape `ND`.
-- `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same lengths within one batch. This is used in calculating loss. Shape `ND`.
-
-If you only need inference, only key `image` is needed.
-
-### Dataloader and collate function
-
-WIP
-
-## Loss functions
-
-### Focal loss
-
-Focal losses are used for heatmap output. All losses here are implemented to use with logit outputs (before sigmoid) to improve numerical stability.
-
-- [x] CornerNet focal loss: first used in CornerNet. It was called Modified focal loss in the paper. Paper: https://arxiv.org/abs/1808.01244
-- [x] Quality focal loss: proposed by Generalized Focal Loss paper. It generalizes Original focal loss (Retinanet). Paper: https://arxiv.org/abs/2006.04388
-
-### Box loss
-
-Box losses are used for bounding box regression. Only 2D is supported for now.
-
-- [x] IoU loss
-- [x] Generalized IoU loss. Paper: https://arxiv.org/abs/1902.09630
-- [x] Distance IoU loss. Paper: https://arxiv.org/abs/1911.08287
-- [x] Complete IoU loss. Paper: https://arxiv.org/abs/1911.08287
+To see how to use each dataset type, see [datasets.md](docs/datasets.md)
 
 ## Notes
 
