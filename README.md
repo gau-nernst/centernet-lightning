@@ -121,7 +121,7 @@ You can train CenterNet with the provided train script `train.py` and a config f
 python train.py --config "configs/coco_resnet34.yaml"
 ```
 
-See sample config files at [config/](config/). To customize training, see [training.md](docs/training)
+See sample config files at [configs/](configs/). To customize training, see [training.md](docs/training)
 
 ## Datasets
 
@@ -129,14 +129,14 @@ The following dataset formats are supported:
 
 Detection:
 
-- [x] (COCO)[https://cocodataset.org/]
-- [x] (Pascal VOC)[http://host.robots.ox.ac.uk/pascal/VOC/]
-- [x] (CrowdHuman)[https://www.crowdhuman.org/]
+- [x] [COCO](https://cocodataset.org/)
+- [x] [Pascal VOC](http://host.robots.ox.ac.uk/pascal/VOC/)
+- [x] [CrowdHuman](https://www.crowdhuman.org/)
 
 Tracking:
 
-- [x] (MOT)[https://motchallenge.net/]
-- [x] (KITTI Tracking)[http://www.cvlibs.net/datasets/kitti/eval_tracking.php]
+- [x] [MOT](https://motchallenge.net/)
+- [x] [KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php)
 
 To see how to use each dataset type, see [datasets.md](docs/datasets.md)
 

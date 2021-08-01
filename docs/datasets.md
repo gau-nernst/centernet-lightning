@@ -4,14 +4,14 @@ The following dataset formats are supported:
 
 Detection:
 
-- [x] (COCO)[https://cocodataset.org/]
-- [x] (Pascal VOC)[http://host.robots.ox.ac.uk/pascal/VOC/]
-- [x] (CrowdHuman)[https://www.crowdhuman.org/]
+- [x] [COCO](https://cocodataset.org/)
+- [x] [Pascal VOC](http://host.robots.ox.ac.uk/pascal/VOC/)
+- [x] [CrowdHuman](https://www.crowdhuman.org/)
 
 Tracking:
 
-- [x] (MOT)[https://motchallenge.net/]
-- [x] (KITTI Tracking)[http://www.cvlibs.net/datasets/kitti/eval_tracking.php]
+- [x] [MOT](https://motchallenge.net/)
+- [x] [KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php)
 
 ## Usage
 
