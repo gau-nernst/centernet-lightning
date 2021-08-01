@@ -1,8 +1,8 @@
 from typing import List
+import warnings
 
-import numpy as np
 import torch
-from torch import nn
+from pytorch_lightning import LightningModule
 from torchvision.ops import box_iou, generalized_box_iou
 from scipy.optimize import linear_sum_assignment
 
@@ -25,7 +25,8 @@ def cosine_distance_matrix(v1: torch.Tensor, v2: torch.Tensor, eps=1e-6):
 
 class MatchingCost:
     _reid_costs = {
-        "cosine": cosine_distance_matrix
+        "cosine": cosine_distance_matrix,
+        "euclidean": torch.cdist
     }
     _box_costs = {
         "iou": box_iou,
@@ -48,17 +49,18 @@ class Tracker:
     # Tracktor: https://github.com/phil-bergmann/tracking_wo_bnw/blob/master/src/tracktor/tracker.py
     # DeepSORT: https://github.com/ZQPei/deep_sort_pytorch/blob/master/deep_sort/sort/tracker.py
 
-    def __init__(self, model: nn.Module, device="cpu", nms_kernel=3, num_detections=100, detection_threshold=0.1, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.9):
-        model.eval()
+    def __init__(self, model=None, device=None, nms_kernel=3, num_detections=100, detection_threshold=0.1, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.9):
         self.model = model
-
+        if model is None:
+            warnings.warn("A model was not provided. Only `.update()` will work")
+        
         # hparams
-        self.device = device
+        self.device = (model.device if isinstance(model, LightningModule) else "cpu") if device is None else device
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
         self.detection_threshold = detection_threshold
         self.matching_threshold = matching_threshold
-        self.matching_cost = matching_cost if matching_cost is not None else MatchingCost(reid_weight=1, box_weight=0)
+        self.matching_cost = matching_cost if matching_cost is not None else MatchingCost()
         self.smoothing_factor = smoothing_factor
 
         # state variables
@@ -75,9 +77,12 @@ class Tracker:
     def step_batch(self, images: torch.Tensor, **kwargs):
         """
 
-        Args
+        Args:
             img: single image in CHW format
             kwargs: override post-processing config parameters e.g. nms_kernel, num_tracks
+
+        Returns:
+            a dict with keys "bboxes" and "track_ids"
         """
         device = kwargs.get("device", self.device)
         nms_kernel = kwargs.get("nms_kernel", self.nms_kernel)
@@ -112,8 +117,9 @@ class Tracker:
     @torch.no_grad()
     def step_single(self, img: torch.Tensor, **kwargs):
         img = img.unsqueeze(0)                  # add batch dim
-        track_bboxes, track_ids = self.step_batch(img, **kwargs)
-        return track_bboxes[0], track_ids[0]    # remove batch dim
+        out = self.step_batch(img, **kwargs)
+        out = {k: v[0] for k,v in out.items()}  # remove batch dim
+        return out 
 
     def update(self, bboxes, labels, scores, embeddings, **kwargs):
         detection_threshold = kwargs.get("detection_threshold", self.detection_threshold)
