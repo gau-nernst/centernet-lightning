@@ -110,6 +110,8 @@ class CenterNet(pl.LightningModule):
             return
 
         # gather detections for evaluation
+        # use torchmetrics to handle this instead?
+        # https://github.com/PyTorchLightning/metrics
         mask = batch["mask"].cpu().numpy()
         if self.task == "detection":
             target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
@@ -218,7 +220,7 @@ class CenterNet(pl.LightningModule):
         # pseudo-nms via max pool
         padding = (nms_kernel - 1) // 2
         nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
-        heatmap *= nms_mask
+        heatmap = heatmap * nms_mask
         
         # since box regression is shared, we only consider the best candidate at each heatmap location
         heatmap, labels = torch.max(heatmap, dim=1)
