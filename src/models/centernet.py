@@ -21,7 +21,7 @@ from .heads import build_output_heads
 from .tracker import MatchingCost, Tracker
 from ..datasets import InferenceDataset
 from ..utils import load_config, draw_bboxes, convert_cxcywh_to_xywh, convert_x1y1x2y2_to_xywh
-from ..eval import detections_to_coco_results, evaluate_coco_detection
+from ..eval import detections_to_coco_results, evaluate_coco_detection, evaluate_mot_tracking_sequence
 
 _output_templates = {
     "detection": namedtuple("Detection", "heatmap box_2d"),
@@ -100,37 +100,47 @@ class CenterNet(pl.LightningModule):
 
         return losses["total"]
 
+    def on_validation_epoch_start(self):
+        if self.task == "tracking":
+            self.tracker = Tracker(device=self.device)
+
     def validation_step(self, batch, batch_idx): 
         encoded_outputs = self.get_encoded_outputs(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch, ignore_reid=True)    # during validation, only evaluate detection loss
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)
         
-        if self.task == "tracking":
-            return
-
         # gather detections for evaluation
         # use torchmetrics to handle this instead?
         # https://github.com/PyTorchLightning/metrics
+        # or a plain Metric class to handle gather and reducing logic?
         mask = batch["mask"].cpu().numpy()
         if self.task == "detection":
             target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
             target_labels = [label[m.astype(bool)] for label, m in zip(batch["labels"].cpu().numpy(), mask)]
-            target_detections = {"bboxes": target_bboxes, "labels": target_labels}      # list of 1-d np array of different lengths
+            target = {"bboxes": target_bboxes, "labels": target_labels}    # list of 1-d np array of different lengths
             
-            pred_detections = self.decode_detection(torch.sigmoid(encoded_outputs["heatmap"]), encoded_outputs["box_2d"], normalize_bbox=True)
-            pred_detections = {k: v.cpu().numpy() for k,v in pred_detections.items()}   # 2-d np array with dim batch_size x num_detections (100)
-            pred_detections["bboxes"] = convert_x1y1x2y2_to_xywh(pred_detections["bboxes"])
+            preds = self.decode_detection(encoded_outputs["heatmap"].sigmoid(), encoded_outputs["box_2d"], normalize_bbox=True)
+            preds = {k: v.cpu().numpy() for k,v in preds.items()}           # 2-d np array with dim batch_size x num_detections (100)
+            preds["bboxes"] = convert_x1y1x2y2_to_xywh(preds["bboxes"])
         
         elif self.task == "tracking":
-            pass
+            target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
+            target_track_ids = [track_id[m.astype(bool)] for track_id, m in zip(batch["ids"].cpu().numpy(), mask)]
+            target = {"bboxes": target_bboxes, "track_ids": target_track_ids}
+            
+            preds = self.decode_tracking(encoded_outputs["heatmap"].sigmoid(), encoded_outputs["box_2d"], encoded_outputs["reid"], normalize_bbox=True)
+            pred_bboxes = []
+            pred_track_ids = []
+            for b in range(preds["bboxes"].shape[0]):
+                self.tracker.update(preds["bboxes"][b], preds["labels"][b], preds["scores"][b], preds["embeddings"][b])
+                pred_bboxes.append([convert_x1y1x2y2_to_xywh(x.bbox).cpu().numpy() for x in self.tracker.tracks if x.active])
+                pred_track_ids.append([x.track_id for x in self.tracker.tracks if x.active])
+            preds = {"bboxes": pred_bboxes, "track_ids": pred_track_ids}
         
-        return pred_detections, target_detections
+        return preds, target
 
     def validation_epoch_end(self, outputs):
-        if self.task == "tracking":
-            return
-        
         preds = {key: [] for key in outputs[0][0]}
         target = {key: [] for key in outputs[0][1]}
 
@@ -147,7 +157,8 @@ class CenterNet(pl.LightningModule):
                 metrics_to_return=("AP", "AP50", "AP75")
             )
         elif self.task == "tracking":
-            pass
+            metrics = evaluate_mot_tracking_sequence(preds["bboxes"], preds["track_ids"], target["bboxes"], target["track_ids"])
+            self.tracker = None
         
         for metric, value in metrics.items():
             self.log(f"val/{metric}", value)
