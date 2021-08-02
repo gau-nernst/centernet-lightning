@@ -12,15 +12,15 @@ def evaluate_mot_tracking_sequence(pred_bboxes, pred_track_ids, target_bboxes, t
     This will create the following folder structure
     ```
     temp_dir (from tempfile.TemporaryDirectory())
-    |——gt
-    |  |——seqmap.txt        # contains "sequence_0"
-    |  |——sequence_0
-    |  |  |——gt
-    |  |  |  |——gt.txt      # contains target tracks
-    |  |  |——seqinfo.ini    # sequence info
-    |——trackers
-    |  |——tracker_0
-    |  |  |——sequence_0.txt # contains predicted tracks
+    |—— gt
+    |   |—— seqmap.txt          # contains "sequence_0"
+    |   |—— sequence_0
+    |   |   |—— seqinfo.ini     # sequence info
+    |   |   |—— gt
+    |   |   |   |——gt.txt       # contains target tracks
+    |—— trackers
+    |   |—— tracker_0
+    |   |   |—— sequence_0.txt  # contains predicted tracks
     ```
     """
     sequence_name = "sequence_0"
@@ -78,7 +78,9 @@ def evaluate_mot_tracking_sequence(pred_bboxes, pred_track_ids, target_bboxes, t
 
         metrics = evaluate_mot_tracking_from_file(gt_folder, trackers_folder, trackers_to_eval=[tracker_name], seqmap_file=seqmap_file, skip_split_fol=True)
 
-    return metrics[tracker_name][sequence_name]["pedestrian"]
+    metrics = metrics[tracker_name][sequence_name]["pedestrian"]
+    metrics = {"HOTA": metrics["HOTA"]["HOTA(0)"], "MOTA": metrics["CLEAR"]["MOTA"], "IDF1": metrics["Identity"]["IDF1"]}
+    return metrics
 
 # https://github.com/JonathonLuiten/TrackEval/blob/master/scripts/run_mot_challenge.py
 def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=True, num_parallel_cores=4, trackers_to_eval=None, seqmap_file=None, skip_split_fol=False):
@@ -90,6 +92,8 @@ def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=Tru
     eval_config = trackeval.Evaluator.get_default_eval_config()
     eval_config["USE_PARALLEL"] = use_parallel
     eval_config["NUM_PARALLEL_CORES"] = num_parallel_cores
+    for key in ("OUTPUT_SUMMARY", "OUTPUT_EMPTY_CLASSES", "OUTPUT_DETAILED", "PLOT_CURVES"):
+        eval_config[key] = False
     evaluator = trackeval.Evaluator(eval_config)
 
     # https://github.com/JonathonLuiten/TrackEval/blob/master/trackeval/datasets/mot_challenge_2d_box.py
