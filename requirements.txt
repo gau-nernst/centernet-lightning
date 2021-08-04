@@ -1,6 +1,7 @@
 torch>=1.6.0
 torchvision
 numpy
+filterpy
 cython
 pytorch-lightning
 opencv-python
