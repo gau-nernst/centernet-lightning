@@ -78,12 +78,13 @@ def evaluate_mot_tracking_sequence(pred_bboxes, pred_track_ids, target_bboxes, t
 
         metrics = evaluate_mot_tracking_from_file(gt_folder, trackers_folder, trackers_to_eval=[tracker_name], seqmap_file=seqmap_file, skip_split_fol=True)
 
-    metrics = metrics[tracker_name][sequence_name]["pedestrian"]
-    metrics = {"HOTA": metrics["HOTA"]["HOTA(0)"], "MOTA": metrics["CLEAR"]["MOTA"], "IDF1": metrics["Identity"]["IDF1"]}
+    metrics = metrics[tracker_name][sequence_name]
+    metrics = {"HOTA": metrics["HOTA"].mean(), "MOTA": metrics["MOTA"], "IDF1": metrics["IDF1"]}
     return metrics
 
 # https://github.com/JonathonLuiten/TrackEval/blob/master/scripts/run_mot_challenge.py
-def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=True, num_parallel_cores=4, trackers_to_eval=None, seqmap_file=None, skip_split_fol=False):
+# NOTE: when there are too many tracks, TrackEval will use too much memory and the computer will freeze
+def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=True, num_parallel_cores=4, trackers_to_eval=None, seqmap_file=None, skip_split_fol=False, save_results=False):
     # save and redirect print() to null
     old_stdout = sys.stdout
     sys.stdout = open(os.devnull, "w")
@@ -93,7 +94,7 @@ def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=Tru
     eval_config["USE_PARALLEL"] = use_parallel
     eval_config["NUM_PARALLEL_CORES"] = num_parallel_cores
     for key in ("OUTPUT_SUMMARY", "OUTPUT_EMPTY_CLASSES", "OUTPUT_DETAILED", "PLOT_CURVES"):
-        eval_config[key] = False
+        eval_config[key] = save_results
     evaluator = trackeval.Evaluator(eval_config)
 
     # https://github.com/JonathonLuiten/TrackEval/blob/master/trackeval/datasets/mot_challenge_2d_box.py
@@ -111,7 +112,27 @@ def evaluate_mot_tracking_from_file(gt_folder, trackers_folder, use_parallel=Tru
     metrics_list = [HOTA(), CLEAR(), Identity()]
     
     results, _ = evaluator.evaluate(dataset_list, metrics_list)
+    results = results["MotChallenge2DBox"]
 
     sys.stdout = old_stdout     # restore print()
 
-    return results["MotChallenge2DBox"]
+    # results = {
+    #     "tracker_1": {
+    #         "sequence_1": {
+    #             "pedestrian": {
+    #                 "HOTA": {...},
+    #                 "CLEAR": {...},
+    #                 "Identity": {...}
+    #             }
+    #         },
+    #         "sequence_2": {...}
+    #     },
+    #     "tracker_2": {...}
+    # }
+    for tracker, tracker_result in results.items():
+        for seq, seq_result in tracker_result.items():
+            seq_result = seq_result["pedestrian"]                                           # remove "pedestrian" key
+            seq_result = {k:v for metric in seq_result.values() for k,v in metric.items()}  # unroll nested dict
+            results[tracker][seq] = seq_result
+    
+    return results
