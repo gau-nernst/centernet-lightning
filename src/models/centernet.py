@@ -18,7 +18,7 @@ import cv2
 from .backbones import build_backbone
 from .necks import build_neck
 from .heads import build_output_heads
-from .tracker import MatchingCost, Tracker
+from .tracker import Tracker
 from ..datasets import InferenceDataset
 from ..utils import load_config, draw_bboxes, convert_cxcywh_to_xywh, convert_x1y1x2y2_to_xywh
 from ..eval import detections_to_coco_results, evaluate_coco_detection, evaluate_mot_tracking_sequence
@@ -29,9 +29,11 @@ _output_templates = {
 }
 
 class CenterNet(pl.LightningModule):
-    """General CenterNet model. Build CenterNet from a given backbone and output
+    """General CenterNet model
     """
     def __init__(self, backbone: Dict, neck: Dict, output_heads: Dict, task: str, optimizer: Dict = None, lr_scheduler: Dict = None, **kwargs):
+        """Build CenterNet from backbone, neck, and output heads configurations
+        """
         super().__init__()
 
         return_features = True if neck["name"] in ("fpn") else False
@@ -42,7 +44,7 @@ class CenterNet(pl.LightningModule):
         self.output_stride = self.backbone.output_stride // self.neck.upsample_stride
         
         self.task = task
-        self.optimizer_cfg    = optimizer
+        self.optimizer_cfg = optimizer
         self.lr_scheduler_cfg = lr_scheduler
         self.num_classes = output_heads["heatmap"]["num_classes"]
 
@@ -113,29 +115,48 @@ class CenterNet(pl.LightningModule):
         # gather detections for evaluation
         # use torchmetrics to handle this instead?
         # https://github.com/PyTorchLightning/metrics
-        # or a plain Metric class to handle gather and reducing logic?
-        mask = batch["mask"].cpu().numpy()
+        # or a plain Metric class to handle gathering and reducing logic?
+        mask = batch["mask"].cpu().numpy().astype(bool)
+        bboxes = batch["bboxes"].cpu().numpy()
+
         if self.task == "detection":
-            target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
-            target_labels = [label[m.astype(bool)] for label, m in zip(batch["labels"].cpu().numpy(), mask)]
-            target = {"bboxes": target_bboxes, "labels": target_labels}    # list of 1-d np array of different lengths
+            bboxes = convert_cxcywh_to_xywh(bboxes)
+            labels = batch["labels"].cpu().numpy()
+            target = {
+                "bboxes": [box[m] for box, m in zip(bboxes, mask)],    # list of 1-d np.ndarray of different lengths
+                "labels": [label[m] for label, m in zip(labels, mask)]
+            }
             
             preds = self.decode_detection(encoded_outputs["heatmap"].sigmoid(), encoded_outputs["box_2d"], normalize_bbox=True)
             preds = {k: v.cpu().numpy() for k,v in preds.items()}           # 2-d np array with dim batch_size x num_detections (100)
             preds["bboxes"] = convert_x1y1x2y2_to_xywh(preds["bboxes"])
         
         elif self.task == "tracking":
-            target_bboxes = [box[m.astype(bool)] for box, m in zip(convert_cxcywh_to_xywh(batch["bboxes"].cpu().numpy()), mask)]
-            target_track_ids = [track_id[m.astype(bool)] for track_id, m in zip(batch["ids"].cpu().numpy(), mask)]
-            target = {"bboxes": target_bboxes, "track_ids": target_track_ids}
+            bboxes = convert_cxcywh_to_xywh(bboxes)
+            track_ids = batch["ids"].cpu().numpy()
+            target = {
+                "bboxes": [box[m] for box, m in zip(bboxes, mask)],
+                "track_ids": [track_id[m] for track_id, m in zip(track_ids, mask)]
+            }
             
-            preds = self.decode_tracking(encoded_outputs["heatmap"].sigmoid(), encoded_outputs["box_2d"], encoded_outputs["reid"], normalize_bbox=True)
+            detections = self.decode_tracking(encoded_outputs["heatmap"].sigmoid(), encoded_outputs["box_2d"], encoded_outputs["reid"], normalize_bbox=True)
+            detections = {k: v.cpu().numpy() for k,v in detections.items()}
             pred_bboxes = []
             pred_track_ids = []
-            for b in range(preds["bboxes"].shape[0]):
-                self.tracker.update(preds["bboxes"][b], preds["labels"][b], preds["scores"][b], preds["embeddings"][b])
-                pred_bboxes.append([convert_x1y1x2y2_to_xywh(x.bbox).cpu().numpy() for x in self.tracker.tracks if x.active])
-                pred_track_ids.append([x.track_id for x in self.tracker.tracks if x.active])
+
+            # use Tracker.update() instead of Tracker.step_batch() to avoid running forward pass twice
+            for b in range(detections["bboxes"].shape[0]):
+                new_bboxes = detections["bboxes"][b]
+                new_labels = detections["labels"][b]
+                new_scores = detections["scores"][b]
+                new_embeddings = detections["embeddings"][b]
+                self.tracker.update(new_bboxes, new_labels, new_scores, new_embeddings)
+                
+                track_bboxes = [convert_x1y1x2y2_to_xywh(x.bbox) for x in self.tracker.tracks if x.active]
+                track_ids = [x.track_id for x in self.tracker.tracks if x.active]
+                pred_bboxes.append(track_bboxes)
+                pred_track_ids.append(track_ids)
+            
             preds = {"bboxes": pred_bboxes, "track_ids": pred_track_ids}
         
         return preds, target
@@ -144,6 +165,7 @@ class CenterNet(pl.LightningModule):
         preds = {key: [] for key in outputs[0][0]}
         target = {key: [] for key in outputs[0][1]}
 
+        # concatenate lists
         for (pred_detections, target_detections) in outputs:
             for key in preds:
                 preds[key].extend(pred_detections[key])
@@ -163,6 +185,7 @@ class CenterNet(pl.LightningModule):
         for metric, value in metrics.items():
             self.log(f"val/{metric}", value)
 
+    # this is needed for some learning rate schedulers e.g. OneCycleLR
     # https://github.com/PyTorchLightning/pytorch-lightning/issues/5449#issuecomment-774265729
     def get_steps_per_epoch(self):
         if self._steps_per_epoch is None:
@@ -175,6 +198,8 @@ class CenterNet(pl.LightningModule):
         return self._steps_per_epoch
 
     def log_histogram(self, name: str, values: torch.Tensor, freq=500):
+        """Log histogram. Only TensorBoard and Wandb are supported
+        """
         if self.trainer.global_step % freq != 0:
             return
 
@@ -192,7 +217,6 @@ class CenterNet(pl.LightningModule):
     def register_lr_scheduler(self, lr_scheduler_cfg: Dict):
         self.lr_scheduler_cfg = lr_scheduler_cfg
 
-    # lightning method
     def configure_optimizers(self):
         if self.optimizer_cfg is None:
             warnings.warn("Optimizer config was not specified. Using adam optimizer with lr=1e-3")
@@ -225,6 +249,7 @@ class CenterNet(pl.LightningModule):
         }
         return return_dict
 
+    # move this to individual output head instead?
     def decode_heatmap(self, heatmap: torch.Tensor, nms_kernel=3, num_detections=100):
         batch_size = heatmap.shape[0]
 
@@ -286,10 +311,6 @@ class CenterNet(pl.LightningModule):
             nms_kernel: the kernel used for max pooling (pseudo-nms). Larger values will reduce false positives. Default is 3 (original paper)
             normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
         """
-        # reference implementations
-        # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L234
-        # https://github.com/developer0hye/Simple-CenterNet/blob/main/models/centernet.py#L118
-        # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_decode.py#L28
         topk_scores, topk_indices, topk_labels = self.decode_heatmap(heatmap, nms_kernel=nms_kernel, num_detections=num_detections)
         topk_bboxes = self.decode_box2d(box_2d, topk_indices, normalize_bbox=normalize_bbox)
 
@@ -317,6 +338,8 @@ class CenterNet(pl.LightningModule):
 
     @torch.no_grad()
     def inference_detection(self, data_dir, img_names, batch_size=4, num_detections=100, nms_kernel=3, save_path=None, score_threshold=0):
+        """Run detection on a folder of images
+        """
         transforms = A.Compose([
             A.Resize(height=512, width=512),
             A.Normalize(),
@@ -358,9 +381,10 @@ class CenterNet(pl.LightningModule):
         return all_detections
 
     @torch.no_grad()
-    def inference_tracking(self, data_dir, batch_size=4, save_dir=None, save_results=False, save_images=False):
-        matching_cost = MatchingCost(reid_weight=1, box_weight=0)
-        tracker = Tracker(self, device=self.device, detection_threshold=0.3, num_detections=300, matching_cost=matching_cost, smoothing_factor=0.5)
+    def inference_tracking(self, data_dir, batch_size=4, save_dir=None, save_results=False, save_images=False, **kwargs):
+        """Run tracking on a folder of images
+        """
+        tracker = Tracker(self, device=self.device, **kwargs)
 
         transforms = A.Compose([
             A.Resize(height=608, width=1088),
