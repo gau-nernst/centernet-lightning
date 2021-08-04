@@ -5,6 +5,7 @@ Main dependencies
 - `pytorch`
 - `torchvision`
 - `numpy`
+- `filterpy` (for Kalman filter in tracking)
 - `opencv-python`
 - `pytorch-lightning`
 - `albumentations>=1.0.0` (for augmentations and image transformations)
@@ -32,6 +33,15 @@ git clone <THIS_REPO_GIT_URL>
 cd CenterNet
 ```
 
+## Install from `environment.yml`
+
+```bash
+conda env create -f environment.yml
+conda activate centernet
+```
+
+## Manual install
+
 Create a new virtual environment
 
 ```bash
@@ -47,16 +57,10 @@ conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c conda-forge
 
 If you don't have NVIDIA GPU or don't need GPU support, remove `cudatoolkit=11.1` and `-c conda-forge`.
 
-## Install from `requirements.txt`
+Install `pip` dependencies
 
 ```bash
-pip install -r requirements.txt
-```
-
-## Manual install
-
-```bash
-pip install cython pytorch-lightning opencv-python, albumentations
+pip install filterpy cython pytorch-lightning opencv-python albumentations
 pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
 pip install git+https://github.com/gau-nernst/TrackEval.git
 

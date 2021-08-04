@@ -21,18 +21,18 @@ git clone <THIS_REPO_GIT_URL>
 cd CenterNet
 ```
 
-It is recommended to install PyTorch with `conda`, but `pip` should work also
+Install using `environment.yml`
 
 ```bash
-conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c conda-forge
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate centernet
 ```
 
 For more detailed instructions, see [install.md](docs/install.md)
 
-## Usage
+## Inference
 
-### Model creation
+### Create a CenterNet model
 
 Import `build_centernet` from `models` to build a CenterNet model from a YAML file. Sample config files are provided in the `configs/` directory.
 
@@ -50,9 +50,9 @@ from src.models import CenterNet
 model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 ```
 
-### Inference
+### Folder of images
 
-**Folder of images** Use `CenterNet.inference_detection()` or `CenterNet.inference_tracking()`
+Use `CenterNet.inference_detection()` or `CenterNet.inference_tracking()`
 
 ```python
 model = ...     # create a model as above
@@ -70,7 +70,9 @@ Key | Description | Shape
 
 Results are `np.ndarray`, ready for post-processing.
 
-**Single image** This is useful when you use `CenterNet` in your own applications
+### Single image
+
+This is useful when you use `CenterNet` in your own applications
 
 ```python
 import numpy as np
@@ -106,7 +108,7 @@ with torch.no_grad():
 
 Note: Due to data augmentations during training, the model is robust enough to not need ImageNet normalization in inference. You can normalize input image to `[0,1]` and CenterNet should still work fine.
 
-### Deployment
+## Deployment
 
 `CenterNet` is export-friendly. You can directly export a trained model to ONNX or TorchScript (only tracing) using PyTorch Lightning API
 
@@ -116,8 +118,12 @@ from src.models import CenterNet
 
 model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 model.to_onnx("model.onnx", torch.rand((1,3,512,512)))      # export to ONNX
-model.to_torchscript("model.pt")                            # export to TorchScript
+model.to_torchscript("model.pt", method="trace")            # export to TorchScript. scripting might not work
 ```
+
+### Evaluate a trained model
+
+WIP
 
 ## Training CenterNet
 
@@ -145,16 +151,3 @@ Tracking:
 - [x] [KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php)
 
 To see how to use each dataset type, see [datasets.md](docs/datasets.md)
-
-### Dataset
-
-[Safety Helmet Wearing Dataset](https://github.com/njvisionpower/Safety-Helmet-Wearing-Dataset/)
-
-- Some image files have extension `.JPG` instead of `.jpg`. Rename all `.JPG` to `.jpg` to avoid issues
-- The Google Driver version of the dataset has the annotation `000377.xml` with label `dog`. As noted by the author [here](https://github.com/njvisionpower/Safety-Helmet-Wearing-Dataset/issues/18), it should be `hat` instead.
-
-### Training
-
-CenterNet convergence speed is very slow. The original paper trained the model for 140 epochs on COCO2017. I haven't been able to produce good results training on COCO.
-
-As noted by other people, this is mainly because for regression heads (size and offset), only points at ground truth boxes are used for training. TTFNet comes up with a novel way to tackle this, but it is not implemented here.

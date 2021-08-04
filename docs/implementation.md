@@ -101,3 +101,19 @@ Unsupported features from original CenterNet:
 
 - **Deformable convolution (DCN)**: There are implementations from Torchvision 0.8+, Detectron2, and MMCV. However, this is not export-friendly, so I do not focus on this.
 - **Deep layer aggregation (DLA)**: Available from timm
+
+Convergence speed
+
+Model | Epochs on COCO2017 (official)
+------|------------------------------
+CenterNet | 140
+Faster R-CNN | 60 epochs (on COCO2014 (?))
+RetinateNet | 12
+FCOS | 12
+YOLOv1-v3 | 160 (not sure)
+YOLOv3 | 300
+YOLOX | 300
+nanodet | 280
+
+- CenterNet convergence speed is pretty slow compared to traditional detectors. But when we look at modern one-stage detectors, it's not that bad.
+- As noted by other people, this is mainly because for regression heads (size and offset), only points at ground truth boxes are used for training. There are strategies proposed to use use samples during training, such as TTFNet, FCOS, and ATSS.
