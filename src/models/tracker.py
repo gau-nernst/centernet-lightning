@@ -1,6 +1,7 @@
 from typing import List
 import warnings
 from functools import partial
+from copy import deepcopy
 
 import torch
 import numpy as np
@@ -8,7 +9,7 @@ from scipy.spatial import distance
 from scipy.optimize import linear_sum_assignment
 from filterpy.kalman import KalmanFilter
 
-from ..utils import box_iou_distance_matrix, box_giou_distance_matrix
+from ..utils import box_iou_distance_matrix, box_giou_distance_matrix, load_config
 
 torch.backends.cudnn.benchmark = True
 
@@ -34,13 +35,12 @@ class Tracker:
     # Tracktor: https://github.com/phil-bergmann/tracking_wo_bnw/blob/master/src/tracktor/tracker.py
     # DeepSORT: https://github.com/ZQPei/deep_sort_pytorch/blob/master/deep_sort/sort/tracker.py
 
-    def __init__(self, model=None, device=None, nms_kernel=3, num_detections=300, detection_threshold=0.3, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.5, use_kalman=False):
+    def __init__(self, model=None, nms_kernel=3, num_detections=300, detection_threshold=0.3, matching_threshold=0.2, matching_cost=None, smoothing_factor=0.5, use_kalman=False):
         self.model = model
         if model is None:
             warnings.warn("A model was not provided. Only `.update()` will work")
         
         # hparams
-        self.device = getattr(model, "device", "cpu") if device is None else device
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
         self.detection_threshold = detection_threshold
@@ -70,15 +70,12 @@ class Tracker:
         Returns:
             a dict with keys "bboxes" and "track_ids"
         """
-        device = kwargs.get("device", self.device)
         nms_kernel = kwargs.get("nms_kernel", self.nms_kernel)
         num_detections = kwargs.get("num_detections", self.num_detections)
         
         # forward pass
         self.model.eval()
-        self.model.to(device)
-        
-        images = images.to(device)
+        images = images.to(self.model.device)
         heatmap, box_2d, reid = self.model(images)
 
         # gather new detections and their embeddings
@@ -240,3 +237,16 @@ class Track:
 
     def __repr__(self):
         return f"track id: {self.track_id}, bbox: {self.bbox}, label: {self.label}, embedding: {len(self.embedding)} dim"
+
+def build_matching_cost(config):
+    return MatchingCost(**config)
+
+def build_tracker(config, model=None):
+    if isinstance(config, str):
+        config = load_config(config)["tracker"]
+
+    config = deepcopy(config)
+    if "matching_cost" in config:
+        config["matching_cost"] = build_matching_cost(config["matching_cost"])
+
+    return Tracker(model=model, **config)
