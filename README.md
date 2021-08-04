@@ -1,6 +1,6 @@
 # CenterNet
 
-CenterNet is a strong single-stage, single-scale, and anchor-free object detector. This implementation is built with PyTorch Lightning, supports TorchScript and ONNX export, and has modular design to make it simple customizing the components.
+CenterNet is a strong **single-stage**, **single-scale**, and **anchor-free** object detector. This implementation is built with PyTorch Lightning, supports TorchScript and ONNX export, and has modular design to make it simple customizing the components.
 
 References
 
@@ -10,18 +10,25 @@ References
 - [TF CenterNet](https://github.com/tensorflow/models/tree/master/research/object_detection)
 - [mmdetection CenterNet](https://github.com/open-mmlab/mmdetection/blob/master/mmdet/models/dense_heads/centernet_head.py)
 
+To read more about the architecture and code structure of this implementation, see [implementation.md](docs/implementation.md)
+
 ## Install
 
-You can use the following commands to install the required dependencies.
+Clone this repo and navigate to the repo directory
+
+```bash
+git clone <THIS_REPO_GIT_URL>
+cd CenterNet
+```
+
+It is recommended to install PyTorch with `conda`, but `pip` should work also
 
 ```bash
 conda install pytorch torchvision cudatoolkit=11.1 -c pytorch -c conda-forge
-pip install cython pytorch-lightning opencv-python albumentations
-pip install git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
-pip install git+https://github.com/gau-nernst/TrackEval.git
+pip install -r requirements.txt
 ```
 
-For more information, see [install.md](docs/install.md)
+For more detailed instructions, see [install.md](docs/install.md)
 
 ## Usage
 
@@ -45,64 +52,63 @@ model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 
 ### Inference
 
-To run inference on a folder of images, you can directly use `CenterNet.inference()`
+**Folder of images** Use `CenterNet.inference_detection()` or `CenterNet.inference_tracking()`
 
 ```python
 model = ...     # create a model as above
-model.eval()    # put model in evaluation mode
-
 img_dir = "path/to/img/dir"
-img_names = ["001.jpg", "002.jpg"]
-
-detections = model.inference(img_dir, img_names, num_detections=100)
-
-# detections = {
-#   "bboxes": bounding boxes in x1y1x2y2 format, shape (num_images x num_detections x 4)
-#   "labels": class labels, shape (num_images x num_detections)
-#   "scores": confidence scores, shape (num_images x num_detections)
-# }
+detections = model.inference_detection(img_dir, num_detections=100)
 ```
+
+`detections` is a dictionary with the following keys:
+
+Key | Description | Shape
+----|-------------|-------
+`bboxes` | bounding boxes in x1y1x2y2 format | (num_images x num_detections x 4)
+`labels` | class labels | (num_images x num_detections)
+`scores` | confidence scores | (num_images x num_detections)
 
 Results are `np.ndarray`, ready for post-processing.
 
-Internally, `CenterNet.inference()` uses the `InferenceDataset` to load the data and apply default pre-processing (resize to 512x512, normalize with ImageNet statistics). It also convert bounding boxes' coordinates to original images' dimensions.
-
-To run inference on an image
+**Single image** This is useful when you use `CenterNet` in your own applications
 
 ```python
 import numpy as np
 import torch
 import cv2
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
-# read image from file and normalize to [0,1]
+# read image
 img = cv2.imread("path/to/image")
 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-img = img.astype(np.float32) / 255
 
-# optional pre-processing: resize to 512x512 and normalize with ImageNet statistics
-imagenet_mean = np.array([0.485, 0.456, 0.406])
-imagenet_std = np.array([0.229, 0.224, 0.225])
-img = cv2.resize(img, (512,512))
-img = (img - imagenet_mean) / imagenet_std
-
-# required pre-processing: convert from HWC to CHW format, make it a tensor and add batch dimension
-img = img.transpose(2,0,1)
-img = torch.from_numpy(img).unsqueeze(0)
+# apply pre-processing: resize to 512x512 and normalize with ImageNet statistics
+# use torchvision.transforms should work also
+transforms = A.Compose([
+    A.Resize(height=512, width=512),
+    A.Normalize(),
+    ToTensorV2()
+])
+img = transforms(image=img)["image"]
 
 # create a model as above and put it in evaluation mode
 model = ...     
 model.eval()
 
+# turn off gradient calculation and do forward pass
 with torch.no_grad():
-    encoded_outputs = model(img)
+    encoded_outputs = model(img.unsqueeze(0))
     detections = model.decode_detections(encoded_outputs)
 ```
 
-`detections` have the same format as above, but results are `torch.Tensor`.
+`detections` has the same format as above, but the values are `torch.Tensor`.
+
+Note: Due to data augmentations during training, the model is robust enough to not need ImageNet normalization in inference. You can normalize input image to `[0,1]` and CenterNet should still work fine.
 
 ### Deployment
 
-`CenterNet` is export-friendly. You can directly export a trained model to ONNX or TorchScript using PyTorch Lightning API
+`CenterNet` is export-friendly. You can directly export a trained model to ONNX or TorchScript (only tracing) using PyTorch Lightning API
 
 ```python
 import torch
@@ -139,20 +145,6 @@ Tracking:
 - [x] [KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php)
 
 To see how to use each dataset type, see [datasets.md](docs/datasets.md)
-
-## Notes
-
-### Implementation
-
-Unsupported features from original CenterNet:
-
-- Deformable convolution (DCN). There are implementations from Torchvision 0.8+, Detectron2, and MMCV.
-- Deep layer aggregation (DLA). Available from timm
-
-There are 2 methods to render target heatmap
-
-- CornerNet method
-- TTFNet method
 
 ### Dataset
 

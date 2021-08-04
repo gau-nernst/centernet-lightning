@@ -41,8 +41,8 @@ Currently Albumentation is used to do augmentation. Any Albumentation transforma
 This repo uses PyTorch Lightning, so we have all the PyTorch Lightning benefits. Specify any parameters you want to pass to the `trainer` in the config file to specify the training details. For a full list of option, refer to [Lightning documentation](https://pytorch-lightning.readthedocs.io/en/stable/common/trainer.html)
 
 - Training epochs: Change `max_epochs`
-- Multi-GPU training (not tested): Change `gpus`
 - Mixed-precision training: Change `precision` to 16
+- Multi-GPU training: Change `gpus`. This is not guaranteed to work
 
 ## Custom optimizer and learning rate scheduler
 
