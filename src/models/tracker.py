@@ -3,18 +3,19 @@ import warnings
 from functools import partial
 
 import torch
-from torchvision.ops import box_iou, generalized_box_iou
 import numpy as np
 from scipy.spatial import distance
 from scipy.optimize import linear_sum_assignment
 from filterpy.kalman import KalmanFilter
 
+from ..utils import box_iou_distance_matrix, box_giou_distance_matrix
+
 torch.backends.cudnn.benchmark = True
 
 class MatchingCost:
     _box_costs = {
-        "iou": box_iou,
-        "giou": generalized_box_iou
+        "iou": box_iou_distance_matrix,
+        "giou": box_giou_distance_matrix
     }
     def __init__(self, reid_cost="cosine", box_cost="giou", reid_weight=1, box_weight=0):
         self.reid_cost_fn = partial(distance.cdist, metric=reid_cost)
@@ -24,8 +25,7 @@ class MatchingCost:
     
     def __call__(self, reid_1, box_1, reid_2, box_2):
         reid_cost = self.reid_cost_fn(reid_1, reid_2)
-        # box_cost = 1 - self.box_cost_fn(box_1, box_2)
-        box_cost = 0
+        box_cost = self.box_cost_fn(box_1, box_2)
 
         cost = reid_cost * self.reid_weight + box_cost * self.box_weight
         return cost
@@ -164,7 +164,7 @@ class Tracker:
         for idx in unmatched_tracks:
             self.tracks[idx].active = False
 
-        # increment inactive age and mark for delete
+        # increment inactive age, mark for delete, and predict next kalman state
         for track in self.tracks:
             track.step()
 
@@ -172,7 +172,11 @@ class Tracker:
         self.tracks = [x for x in self.tracks if not x.to_delete]
 
 class Track:
+    """Track object
+    """
     def __init__(self, track_id, bbox, label, embedding, smoothing_factor=0.9, max_inactive_age=30, use_kalman=False):
+        """Initialize new track. Also initialize Kalman state and covariance if `use_kalman=True`
+        """
         self.track_id = track_id
         self.bbox = bbox
         self.label = label
@@ -189,18 +193,19 @@ class Track:
         self.kf = None
         if use_kalman:
             self.kf = KalmanFilter(dim_x=8, dim_z=4)
-            self.kf.x = np.zeros(8)                     # state vector. first 4 values are box corners
-            self.kf.x[:4] = bbox                        # last 4 values are velocities of box corners                   
+            self.kf.x = np.zeros(8)         # state vector
+            self.kf.x[:4] = bbox            # first 4 values are box corners, last 4 values are velocities                 
             
-            self.kf.F = np.eye(8)                       # transition matrix
-            for i in range(4):                          # [[1 1],
-                self.kf.F[i, i+4] = 1                   #  [0 1]]
+            self.kf.F = np.eye(8)           # transition matrix. x_next = x_prev + v_prev dt (dt = 1)
+            for i in range(4):              # [[1 1],
+                self.kf.F[i, i+4] = 1       #  [0 1]]
             
-            self.kf.H = np.eye(4,8)                     # measurement matrix
+            self.kf.H = np.eye(4,8)         # measurement matrix. only measure positions, velocities are not observed
             
-            std = np.tile(bbox[2:] - bbox[:2], 4)       # initiate covariance matrix
-            std[:4] /= 10                               # values are adapted from DeepSORT
-            std[4:] /= 16
+            wh = bbox[2:] - bbox[:2]        # initiate covariance matrix as a diagonal matrix
+            std = np.tile(wh, 4)            # values are relative to width/height (adapted from DeepSORT)
+            std[:4] /= 10                   # std in position = wh/10
+            std[4:] /= 16                   # std in velocity = wh/16
             self.kf.P = np.diag(std**2)
 
     def step(self):
@@ -211,22 +216,24 @@ class Track:
                 self.to_delete = True
 
         if self.kf is not None:
-            process_std = np.tile(self.kf.x[2:4] - self.kf.x[:2], 4)
+            wh = self.kf.x[2:4] - self.kf.x[:2]         # process noise relative to current width/height
+            process_std = np.tile(wh, 4)
             process_std[:4] /= 20
             process_std[4:] /= 160
-            self.kf.Q = np.diag(process_std**2)
-            self.kf.predict()
+            process_noise = np.diag(process_std**2)
+            self.kf.predict(Q=process_noise)
 
     def update(self, bbox, embedding):
         if self.kf is None:
             self.bbox = bbox
         
         else:
-            measure_std = np.tile(self.kf.x[2:4] - self.kf.x[:2], 2)
+            wh = self.kf.x[2:4] - self.kf.x[:2]         # measurement noise relative to current width/height
+            measure_std = np.tile(wh, 2)
             measure_std[:4] /= 20
             measure_std[4:] /= 160
-            self.kf.R = np.diag(measure_std**2)
-            self.kf.update(bbox)
+            measure_noise = np.diag(measure_std**2)
+            self.kf.update(bbox, R=measure_noise)
             self.bbox = self.kf.x[:4]
 
         self.embedding = (1-self.smoothing_factor) * self.embedding + self.smoothing_factor * embedding

@@ -80,3 +80,44 @@ def convert_x1y1x2y2_to_cxcywh(bboxes: Union[np.ndarray, torch.Tensor], inplace=
     convert_x1y1x2y2_to_xywh(bboxes, inplace=True)
     convert_xywh_to_cxcywh(bboxes, inplace=True)
     return bboxes
+
+def box_inter_union_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
+    area1 = (boxes1[...,2] - boxes1[...,0]) * (boxes1[...,3] - boxes1[...,1])
+    area2 = (boxes2[...,2] - boxes2[...,0]) * (boxes2[...,3] - boxes2[...,1])
+
+    lt = np.maximum(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
+    rb = np.minimum(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
+
+    wh = (rb - lt).clip(min=0)          # [N,M,2]
+    inter = wh[:, :, 0] * wh[:, :, 1]   # [N,M]
+
+    union = area1[:, None] + area2 - inter
+
+    return inter, union
+
+def box_iou_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
+    inter, union = box_inter_union_matrix(boxes1, boxes2)
+    iou = inter / union
+    return iou
+
+def box_giou_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
+    inter, union = box_inter_union_matrix(boxes1, boxes2)
+    iou = inter / union
+
+    lti = np.minimum(boxes1[:, None, :2], boxes2[:, :2])
+    rbi = np.maximum(boxes1[:, None, 2:], boxes2[:, 2:])
+
+    whi = (rbi - lti).clip(min=0)       # [N,M,2]
+    areai = whi[:, :, 0] * whi[:, :, 1]
+
+    return iou - (areai - union) / areai
+
+def box_iou_distance_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
+    """1 - IoU
+    """
+    return 1 - box_iou_matrix(boxes1, boxes2)
+
+def box_giou_distance_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
+    """1 - GIoU
+    """
+    return 1 - box_giou_matrix(boxes1, boxes2)
