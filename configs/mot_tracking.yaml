@@ -33,10 +33,9 @@ model:
       loss_weight: 1
 
   optimizer:
-    name: SGD
+    name: Adam
     params:
-      lr: 0.001
-      momentum: 0.9
+      lr: 0.0001
       weight_decay: 0.0001
 
   lr_scheduler:
@@ -112,7 +111,7 @@ data:
 trainer:
   gpus: 1
   precision: 16
-  max_epochs: 10
+  max_epochs: 30
   val_check_interval: 1.0
   benchmark: True
   gradient_clip_val: 35
@@ -126,7 +125,8 @@ trainer:
   callbacks:
     - name: ModelCheckpoint
       params:
-        monitor: val/total_loss
+        monitor: val/HOTA
+        mode: max
         save_last: True
 
     - name: LearningRateMonitor

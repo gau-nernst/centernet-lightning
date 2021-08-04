@@ -103,7 +103,8 @@ trainer:
   callbacks:
     - name: ModelCheckpoint
       params:
-        monitor: val/total_loss
+        monitor: val/AP
+        mode: max
         save_last: True
 
     - name: LearningRateMonitor

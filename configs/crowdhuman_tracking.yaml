@@ -34,7 +34,6 @@ model:
     name: Adam
     params:
       lr: 0.0001
-      # momentum: 0.9
       weight_decay: 0.0001
 
   lr_scheduler:
@@ -101,8 +100,23 @@ trainer:
   benchmark: True
   gradient_clip_val: 35
 
-logger:
-  name: wandb
-  params:
-    project: crowdhuman_tracking
-    log_model: True
+  logger:
+    name: WandbLogger
+    params:
+      project: crowdhuman_tracking
+      log_model: True
+
+  callbacks:
+    - name: ModelCheckpoint
+      params:
+        monitor: val/total_loss
+        save_last: True
+
+    - name: LearningRateMonitor
+      params:
+        logging_interval: step
+    
+    - name: LogImageCallback
+      params:
+        n_epochs: 5
+        random: True
