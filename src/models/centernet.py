@@ -384,7 +384,7 @@ class CenterNet(pl.LightningModule):
     def inference_tracking(self, data_dir, batch_size=4, save_dir=None, save_results=False, save_images=False, **kwargs):
         """Run tracking on a folder of images
         """
-        tracker = Tracker(self, device=self.device, **kwargs)
+        tracker = Tracker(self, **kwargs)
 
         transforms = A.Compose([
             A.Resize(height=608, width=1088),
@@ -446,6 +446,7 @@ class CenterNet(pl.LightningModule):
 
     # allow loading checkpoint with mismatch weights
     # https://github.com/PyTorchLightning/pytorch-lightning/issues/4690#issuecomment-731152036
+    # there will be signature change: https://github.com/PyTorchLightning/pytorch-lightning/pull/8697
     def on_load_checkpoint(self, checkpoint):
         state_dict = checkpoint["state_dict"]
         model_state_dict = self.state_dict()
