@@ -4,18 +4,61 @@ The following dataset formats are supported:
 
 Detection:
 
-- [x] [COCO](https://cocodataset.org/)
-- [x] [Pascal VOC](http://host.robots.ox.ac.uk/pascal/VOC/)
-- [x] [CrowdHuman](https://www.crowdhuman.org/)
+Format | Class name
+-------|-----------
+[COCO](https://cocodataset.org/) | `COCODataset`
+[Pascal VOC](http://host.robots.ox.ac.uk/pascal/VOC/) | `VOCDataset`
+[CrowdHuman](https://www.crowdhuman.org/) | `CrowdHumanDataset`
 
 Tracking:
 
-- [x] [MOT](https://motchallenge.net/)
-- [x] [KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php)
+Format | Class name
+-------|-----------
+[MOT](https://motchallenge.net/) | `MOTTrackingSequence` and `MOTTrackingDataset`
+[KITTI Tracking](http://www.cvlibs.net/datasets/kitti/eval_tracking.php) | `KITTITrackingSequence` and `KITTITrackingDataset`
 
 ## Usage
 
-WIP
+Typical usage
+
+```python
+from torch.utils.data import DataLoader
+from src.datasets import COCODataset, CollateDetection, get_default_detection_transforms
+
+transforms = get_default_detection_transforms()
+dataset = COCODataset("datasets/COCO", "train2017", transforms=transforms)
+collate_fn = CollateDetection()
+dataloader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
+```
+
+### Constructor
+
+Datasets use a common constructor signature
+
+Argument | Description | Notes
+---------|-------------|------
+`data_dir` | Path to data directory |
+`split` | Data split e.g. `train`, `val` |
+`transforms` (default: `None`) | An `albumentations` transform | When `transforms=None`, dataset will return original NumPy image array from OpenCV (RGB)
+`name_to_label` (default: `None`) | A dictionary that maps from string name to integer label e.g. `{"person": 0}` | Only available for Pascal VOC and KITTI Tracking. This is required for training
+
+### Dataset item
+
+Dataset items are dictionaries with the following keys
+
+Key | Description | Shape
+----|-------------|------
+`image` | RGB images in `CHW` format | 3 x img_height x img_width
+`bboxes`| Bounding boxes in `(cx,cy,w,h)` format | 4 x num_detections
+`labels` | Labels `[0,num_classes-1]` | num_detections
+`ids` | (only for tracking) Unique object id | num_detections
+`mask` | (only in batch) Binary mask, either `0` or `1` | num_detections
+
+### Collate function
+
+Since images within a batch have different number of detections, we need to pad `bboxes`, `labels`, and `ids` (only for tracking) to the same size. Use `CollateDetection()` and `CollateTracking()` to pad to largest number of detections. 
+
+Pass this to `collate_fn` argument of PyTorch `DataLoader`. Each batch will have an extra key `mask`, which is a binary mask for each image's set of detections.
 
 ## Detection datasets
 
@@ -64,11 +107,11 @@ VOC_root
 │   ├── ...
 ```
 
-Make sure your file extension is correct (`.jpg` for images, `.xml` for annotations, and `.txt` for image sets/splits).
+Make sure file extensions are correct.
 
 The dataset split (e.g. `train.txt`) contains a list of image names without file extension. Each name is on a separate line.
 
-To create a Pascal VOC dataset
+To create a Pascal VOC dataset:
 
 ```python
 from src.datasets import VOCDataset
@@ -98,6 +141,8 @@ CrowdHuman_root
 ├── val/
 │   ├── ...
 ```
+
+By default, class `mask` is ignored. To include class `mask`, pass in `ignore_mask=False`
 
 ## Tracking datasets
 
@@ -146,10 +191,15 @@ KITTI_tracking_root
 
 ## Inference dataset
 
+Typical usage
+
 ```python
 from src.datasets import InferenceDataset
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
-dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"], resize_height=512, resize_width=512)
+transforms = A.Compose([A.Resize(width=512, height=512), A.Normalize(), ToTensorV2()])
+dataset = InferenceDataset("img_folder", transforms=transforms)
 
 # dataset[0] = {
 #   "image_path": full path to the image
@@ -159,18 +209,25 @@ dataset = InferenceDataset("path/to/img/dir", img_names=["sample_img.jpg"], resi
 # }
 ```
 
-- `img_names` is optional. if not provided, the dataset will use all JPEG images found in the folder `img_dir`.
-- `resize_height` and `resize_width`: image dimensions when input to the model. Default to 512x512, the resolution 
+Constructor
 
-Inference dataset does not need a custom collate function. You can create a data loader directly from an inference dataset instance.
+Argument | Description
+---------|------------
+`data_dir` | Path to data directory
+`img_names` (default: `None`) | File names in `data_dir` to use. If `None`, all JPEG images in the folder will be used
+`transforms` (default: `None`) | An `albumentations` transform 
+
+Dataset item
+
+Key | Description
+----|------------
+`image` | RGB image in `CHW` format
+`image_path` | Full path to original image
+`original_width` | Original image width
+`original_height` | Original image height
+
+Inference dataset does not need padding when batched. You can create a data loader directly from an inference dataset instance.
 
 ## Custom dataset for training
 
-You can write your own custom dataset, as long as it conforms to the format that the model expects. A batch of input data should be a dictionary with the following key-value pairs:
-
-- `image`: images in `CHW` format. Shape `NCHW`.
-- `bboxes`: bounding boxes in `(cx,cy,w,h)` format (unit: pixel). Shape `ND4`, where `D` is the number of detections in one image.
-- `labels`: labels `[0,num_classes-1]`. Shape `ND`.
-- `mask`: binary mask of `0` or `1`. Since each image has different number of detections, `bboxes` and `labels` are padded so that they have the same lengths within one batch. This is used in calculating loss. Shape `ND`.
-
-If you only need inference, only key `image` is needed.
+To write custom dataset, make sure you follow the format as described above.
