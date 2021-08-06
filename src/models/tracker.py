@@ -113,8 +113,8 @@ class Tracker:
             self.update(bboxes, labels, scores, embeddings, **kwargs)    
             self.frame += 1
 
-            track_bboxes = [x.bbox for x in self.tracks if x.state == TrackState.ACTIVE]
-            track_ids = [x.track_id for x in self.tracks if x.state == TrackState.ACTIVE]
+            track_bboxes = [x.bbox for x in self.tracks if x.active]
+            track_ids = [x.track_id for x in self.tracks if x.active]
             out["bboxes"].append(track_bboxes)
             out["track_ids"].append(track_ids)
             
@@ -194,11 +194,25 @@ class Tracker:
             self.next_track_id += 1
 
         # remove tracks
-        self.tracks = [x for x in self.tracks if x.state != TrackState.TO_DELETE]
+        self.tracks = [x for x in self.tracks if not x.to_delete]
 
         # kalman filter predict step
         for track in self.tracks:
             track.kalman_predict()
+
+def xyxy_to_xyah(box):
+    box = box.copy()
+    box[2:] = box[2:] - box[:2]         # xywh
+    box[:2] = box[:2] + box[2:] / 2     # cxcywh
+    box[2] = box[2] / box[3]            # cxcyah
+    return box
+
+def xyah_to_xyxy(box):
+    box = box.copy()
+    box[2] = box[2] * box[3]            # cxcywh
+    box[:2] = box[:2] - box[2:] / 2     # xywh
+    box[2:] = box[:2] + box[2:]         # xyxy
+    return box
 
 class Track:
     """Track object
@@ -240,11 +254,32 @@ class Track:
             self.kf.H = np.eye(4,8)
             
             # initiate covariance matrix. it is a diagonal matrix
-            wh = bbox[2:] - bbox[:2]        
+            wh = bbox[2:] - bbox[:2]
             std = np.tile(wh, 4)            # adapted from DeepSORT
             std[:4] /= 10                   # std in position = wh/10
             std[4:] /= 16                   # std in velocity = wh/16
             self.kf.P = np.diag(std**2)
+
+            # xyah version
+            # self.kf.x[:4] = xyxy_to_xyah(bbox)
+            # h = bbox[3] - bbox[1]
+            # std = [
+            #     h/10, h/10, 1e-2, h/10,
+            #     h/16, h/16, 1e-5, h/16
+            # ]
+            # self.kf.P = np.diag(np.square(std))
+
+    @property
+    def active(self):
+        return self.state == TrackState.ACTIVE
+
+    @property
+    def confirmed(self):
+        return self.state != TrackState.UNCONFIRMED
+
+    @property
+    def to_delete(self):
+        return self.state == TrackState.TO_DELETE
 
     def kalman_predict(self):
         if self.kf is not None:
@@ -253,8 +288,17 @@ class Track:
             process_std = np.tile(wh, 4)
             process_std[:4] /= 20
             process_std[4:] /= 160
-            process_noise = np.diag(process_std**2)
+            process_noise = np.diag(np.square(process_std))
             self.kf.predict(Q=process_noise)
+
+            # xyah version
+            # h = self.kf.x[3]
+            # process_std = [
+            #     h/20, h/20, 1e-2, h/20,
+            #     h/160, h/160, 1e-5, h/160
+            # ]
+            # process_noise = np.diag(np.square(process_std))
+            # self.kf.predict(Q=process_noise)
 
     def update_matched(self, bbox, embedding):
         # state management
@@ -274,12 +318,17 @@ class Track:
         else:
             # calculate measurement noise. adapted from DeepSORT
             wh = self.kf.x[2:4] - self.kf.x[:2]
-            measure_std = np.tile(wh, 2)
-            measure_std[:4] /= 20
-            measure_std[4:] /= 160
+            measure_std = np.tile(wh, 2) / 20
             measure_noise = np.diag(measure_std**2)
             self.kf.update(bbox, R=measure_noise)
             self.bbox = self.kf.x[:4]
+
+            # xyah version
+            # h = self.kf.x[3]
+            # measure_std = [h/20, h/20, 0.1, h/20]
+            # measure_noise = np.diag(np.square(measure_std))
+            # self.kf.update(xyxy_to_xyah(bbox), R=measure_noise)
+            # self.bbox = xyah_to_xyxy(self.kf.x[:4])
 
         # update embedding
         embedding = embedding / np.linalg.norm(embedding)
