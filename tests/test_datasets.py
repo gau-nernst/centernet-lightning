@@ -5,9 +5,9 @@ import yaml
 import numpy as np
 import torch
 
-from src.datasets import COCODataset, VOCDataset, CrowdHumanDataset, MOTTrackingSequence, MOTTrackingDataset, KITTITrackingSequence, KITTITrackingDataset
-from src.datasets.utils import get_default_detection_transforms, get_default_tracking_transforms, CollateDetection, CollateTracking
-from src.datasets.builder import build_dataset, build_dataloader
+from centernet_lightning.datasets import COCODataset, VOCDataset, CrowdHumanDataset, MOTTrackingSequence, MOTTrackingDataset, KITTITrackingSequence, KITTITrackingDataset
+from centernet_lightning.datasets.utils import get_default_detection_transforms, get_default_tracking_transforms, CollateDetection, CollateTracking
+from centernet_lightning.datasets.builder import build_dataset, build_dataloader
 
 COCO_DIR = "datasets/COCO"
 VOC_DIR = "datasets/VOC2012"

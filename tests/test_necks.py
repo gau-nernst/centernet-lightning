@@ -1,6 +1,6 @@
 import torch
 
-from src.models.necks import SimpleNeck, FPNNeck, IDANeck, BiFPNNeck, build_neck
+from centernet_lightning.models.necks import SimpleNeck, FPNNeck, IDANeck, BiFPNNeck, build_neck
 
 test_config = "configs/test_config.yaml"
 

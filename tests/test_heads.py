@@ -2,7 +2,7 @@ from random import sample
 from numpy.lib.arraysetops import isin
 import torch
 
-from src.models.heads import HeatmapHead, Box2DHead
+from centernet_lightning.models.heads import HeatmapHead, Box2DHead
 
 sample_input = {
     "image": torch.rand((4,3,512,512)),

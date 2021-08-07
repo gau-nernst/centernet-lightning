@@ -23,7 +23,7 @@ Typical usage
 
 ```python
 from torch.utils.data import DataLoader
-from src.datasets import COCODataset, CollateDetection, get_default_detection_transforms
+from centernet_lightning.datasets import COCODataset, CollateDetection, get_default_detection_transforms
 
 transforms = get_default_detection_transforms()
 dataset = COCODataset("datasets/COCO", "train2017", transforms=transforms)
@@ -81,7 +81,7 @@ COCO_root
 To create a COCO dataset:
 
 ```python
-from src.datasets import COCODataset
+from centernet_lightning.datasets import COCODataset
 
 dataset = COCODataset("COCO_root", "val2017")
 ```
@@ -114,7 +114,7 @@ The dataset split (e.g. `train.txt`) contains a list of image names without file
 To create a Pascal VOC dataset:
 
 ```python
-from src.datasets import VOCDataset
+from centernet_lightning.datasets import VOCDataset
 
 name_to_label = {
     "person": 0,
@@ -194,7 +194,7 @@ KITTI_tracking_root
 Typical usage
 
 ```python
-from src.datasets import InferenceDataset
+from centernet_lightning.datasets import InferenceDataset
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 

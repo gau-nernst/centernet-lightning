@@ -12,7 +12,7 @@ You can also import the `train()` function from the train script to train in you
 
 ```python
 from train import train
-from src.utils import load_config
+from centernet_lightning.utils import load_config
 
 # train with config file
 train("config_file.yaml")

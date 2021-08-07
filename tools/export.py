@@ -2,7 +2,7 @@ import argparse
 
 import torch
 
-from src.models import CenterNet
+from centernet_lightning.models import CenterNet
 
 def export_torchscript(checkpoint_path, save_path, input_size=512):
     model = CenterNet.load_from_checkpoint(checkpoint_path)

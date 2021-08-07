@@ -1,8 +1,8 @@
 import torch
 from torchvision.ops import box_iou, generalized_box_iou
 
-from src.losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
-from src.losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
+from centernet_lightning.losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
+from centernet_lightning.losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
 
 EPS = 1e-6
 

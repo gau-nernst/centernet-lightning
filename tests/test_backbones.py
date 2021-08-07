@@ -1,5 +1,5 @@
 import torch
-from src.models.backbones import ResNetBackbone, MobileNetBackbone, build_backbone
+from centernet_lightning.models.backbones import ResNetBackbone, MobileNetBackbone, build_backbone
 
 _backbones = [
     {

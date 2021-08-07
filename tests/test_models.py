@@ -2,9 +2,9 @@ import os
 
 import torch
 
-from src.models import CenterNet, build_centernet_from_cfg
-from src.backbones.simple import SimpleBackbone
-from src.datasets import render_target_heatmap_cornernet
+from centernet_lightning.models import CenterNet, build_centernet_from_cfg
+from centernet_lightning.backbones.simple import SimpleBackbone
+from centernet_lightning.datasets import render_target_heatmap_cornernet
 
 sample_cfg = "configs/coco_resnet34.yaml"
 

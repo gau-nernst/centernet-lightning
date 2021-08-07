@@ -37,7 +37,7 @@ For more detailed instructions, see [install.md](docs/install.md)
 Import `build_centernet` from `models` to build a CenterNet model from a YAML file. Sample config files are provided in the `configs/` directory.
 
 ```python
-from src.models import build_centernet
+from centernet_lightning.models import build_centernet
 
 model = build_centernet("configs/coco_resnet34.yaml")
 ```
@@ -45,7 +45,7 @@ model = build_centernet("configs/coco_resnet34.yaml")
 You also can load a CenterNet model directly from a checkpoint thanks to PyTorch Lightning.
 
 ```python
-from src.models import CenterNet
+from centernet_lightning.models import CenterNet
 
 model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 ```
@@ -114,7 +114,7 @@ Note: Due to data augmentations during training, the model is robust enough to n
 
 ```python
 import torch
-from src.models import CenterNet
+from centernet_lightning.models import CenterNet
 
 model = CenterNet.load_from_checkpoint("path/to/checkpoint.ckpt")
 model.to_onnx("model.onnx", torch.rand((1,3,512,512)))      # export to ONNX

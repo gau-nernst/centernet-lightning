@@ -9,9 +9,9 @@ import pytorch_lightning.loggers as pl_loggers
 import pytorch_lightning.callbacks as pl_callbacks
 import wandb
 
-from src.models import build_centernet
-from src.datasets import build_dataloader
-from src.utils import LogImageCallback, load_config
+from centernet_lightning.models import build_centernet
+from centernet_lightning.datasets import build_dataloader
+from centernet_lightning.utils import LogImageCallback, load_config
 
 def train(config: Union[str, Dict]):
     """Train CenterNet from a config.

@@ -19,7 +19,7 @@ Backbone | Description
 `TimmBackbone` | a thin wrapper around [timm](https://github.com/rwightman/pytorch-image-models) to use Ross Wightman models
 
 ```python
-from src.models import ResNetBackbone
+from centernet_lightning.models import ResNetBackbone
 
 backbone = ResNetBackbone("resnet18", pretrained=True, frozen_stages=3)
 ```
@@ -43,7 +43,7 @@ Neck | Description
 `IDANeck` | iteratively fuse consecutive feature maps from backbone until there is only 1 feature map left. See [Deep Layer Aggregation](https://arxiv.org/abs/1707.06484). This is used in the original CenterNet with DLA-34 backbone
 
 ```python
-from src.models import SimpleNeck, FPNNeck
+from centernet_lightning.models import SimpleNeck, FPNNeck
 
 neck = SimpleNeck([512])    # feature map channels from backbone
 neck = FPNNeck([64, 128, 256, 512], upsample_channels=[256, 128, 64], conv_type="normal", upsample_type="nearest")
@@ -62,7 +62,7 @@ Output head | Description | Number of channels
 `reid` | re-identification embedding, used in FairMOT | embedding_dim (default: 64)
 
 ```python
-from src.models import HeatmapHead
+from centernet_lightning.models import HeatmapHead
 
 head = HeatmapHead(64, 2)       # last channel of neck and number of classes
 ```
