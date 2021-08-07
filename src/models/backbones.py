@@ -2,6 +2,7 @@ from typing import Dict, Union
 from copy import deepcopy
 
 from torch import nn
+from torch.nn.modules.batchnorm import _BatchNorm
 from torchvision.models import resnet, mobilenet
 import timm
 
@@ -19,18 +20,15 @@ _backbone_channels = {
 }
 
 class ResNetBackbone(nn.Module):
-    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, **kwargs):
+    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, freeze_bn_stats=False, **kwargs):
         super().__init__()
         self.frozen_stages = frozen_stages
+        self.freeze_bn_stats = freeze_bn_stats
         backbone = resnet.__dict__[name](pretrained=pretrained)
 
-        # group max pool with stage1 to make output features have consistent strides
         # may replace 7x7 conv with 3 3x3 conv
-        # self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
-        # self.stage1 = nn.Sequential(backbone.maxpool, backbone.layer1)
-        
-        self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
-        self.stage1 = backbone.layer1
+        self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
+        self.stage1 = nn.Sequential(backbone.maxpool, backbone.layer1)
         self.stage2 = backbone.layer2
         self.stage3 = backbone.layer3
         self.stage4 = backbone.layer4
@@ -42,7 +40,7 @@ class ResNetBackbone(nn.Module):
         self.freeze_stages()
 
     def forward(self, x):
-        out1 = self.stem(x)         # stride 4
+        out1 = self.stem(x)         # stride 2
         out2 = self.stage1(out1)    # stride 4
         out3 = self.stage2(out2)    # stride 8
         out4 = self.stage3(out3)    # stride 16
@@ -65,11 +63,16 @@ class ResNetBackbone(nn.Module):
     def train(self, mode=True):
         super().train(mode=mode)
         self.freeze_stages()
+        if self.freeze_bn_stats:
+            for module in self.modules():
+                if isinstance(module, _BatchNorm):
+                    module.eval()
 
 class MobileNetBackbone(nn.Module):
-    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, **kwargs):
+    def __init__(self, name: str, pretrained: bool = True, return_features=False, frozen_stages=0, freeze_bn_stats=False, **kwargs):
         super().__init__()
         self.frozen_stages = frozen_stages
+        self.freeze_bn_stats = freeze_bn_stats
 
         # conv with stride = 2 (downsample) will be the first layer of each stage
         # this is to ensure that at each stage, it is the most refined feature map at that resolution
@@ -88,8 +91,8 @@ class MobileNetBackbone(nn.Module):
             else:
                 stage.append(features[i])
         
-        # include last conv layer in the last stage
-        stage.append(features[-1])
+        # NOTE: the last expansion 1x1 conv is not included to save computation
+        # MobileNetV2 paper does this for DeepLabV3 - MobileNetV2
         self.stages.append(nn.Sequential(*stage))
 
         self.out_channels = _backbone_channels[name]
@@ -121,6 +124,10 @@ class MobileNetBackbone(nn.Module):
     def train(self, mode):
         super().train(mode=mode)
         self.freeze_stages()
+        if self.freeze_bn_stats:
+            for module in self.modules():
+                if isinstance(module, _BatchNorm):
+                    module.eval()
 
 class TimmBackbone(nn.Module):
     def __init__(self, name: str, pretrained: bool = True, return_features=False, **kwargs):
