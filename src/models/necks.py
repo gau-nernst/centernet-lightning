@@ -1,132 +1,37 @@
 from typing import Dict, Union
-import math
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
+from .layers import Fuse, make_conv, make_upsample
 from ..utils import load_config
 
-# potential dcn implementations
-# torchvision: https://pytorch.org/vision/stable/ops.html#torchvision.ops.deform_conv2d
-# detectron: https://detectron2.readthedocs.io/en/latest/modules/layers.html#detectron2.layers.ModulatedDeformConv
-# mmcv: https://mmcv.readthedocs.io/en/stable/api.html#mmcv.ops.DeformConv2d
-
-def _make_upsample(upsample_type="nearest", deconv_channels=None, deconv_kernel=3, deconv_init_bilinear=True, **kwargs):
-    assert upsample_type in ("conv_transpose", "bilinear", "nearest")
-
-    if upsample_type == "conv_transpose":
-        output_padding = deconv_kernel % 2
-        padding = (deconv_kernel + output_padding) // 2 - 1
-
-        upsample = nn.ConvTranspose2d(deconv_channels, deconv_channels, deconv_kernel, stride=2, padding=padding, output_padding=output_padding, bias=False)
-        bn = nn.BatchNorm2d(deconv_channels)
-        relu = nn.ReLU(inplace=True)
-        upsample_layer = nn.Sequential(upsample, bn, relu)
-
-        if deconv_init_bilinear:    # TF CenterNet does not do this
-            _init_bilinear_upsampling(upsample)
-    
-    else:
-        upsample_layer = nn.Upsample(scale_factor=2, mode=upsample_type)
-
-    return upsample_layer
-
-def _init_bilinear_upsampling(deconv_layer):
-    # initialize convolution transpose layer as bilinear upsampling
-    # this helps with training stability
-    # https://github.com/ucbdrive/dla/blob/master/dla_up.py#L26-L33
-    w = deconv_layer.weight.data
-    f = math.ceil(w.size(2) / 2)
-    c = (2*f - 1 - f%2) / (f*2.)
-    
-    for i in range(w.size(2)):
-        for j in range(w.size(3)):
-            w[0,0,i,j] = (1 - math.fabs(i/f - c)) * (1 - math.fabs(j/f - c))
-    
-    for c in range(1, w.size(0)):
-        w[c,0,:,:] = w[0,0,:,:]
-
-def _make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, **kwargs):
-    assert conv_type in ("dcn", "separable", "normal")
-
-    if conv_type == "dcn":          # deformable convolution
-        raise NotImplementedError()
-    elif conv_type == "separable":  # depthwise-separable convolution
-        raise NotImplementedError()
-    else:                           # normal convolution
-        conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=1, bias=False)
-        bn = nn.BatchNorm2d(out_channels)
-        relu = nn.ReLU(inplace=True)
-        conv_layer = nn.Sequential(conv, bn, relu)
-
-        nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
-
-    return conv_layer
-
-def _make_downsample(downsample_type="max", conv_channels=None, conv_kernel=3, **kwargs):
-    assert downsample_type in ("max", "average", "conv")
-
-    if downsample_type == "conv":
-        downsample = nn.Conv2d(conv_channels, conv_channels, conv_kernel, stride=2, padding="same", bias=False)
-        bn = nn.BatchNorm2d(conv_channels)
-        relu = nn.ReLU(inplace=True)
-        downsample_layer = nn.Sequential(downsample, bn, relu)
-
-        nn.init.kaiming_normal_(downsample.weight, mode="fan_out", nonlinearity="relu")
-    
-    elif downsample_type == "max":
-        downsample_layer = nn.MaxPool2d(2, 2)
-    else:
-        downsample_layer = nn.AvgPool2d(2, 2)
-    
-    return downsample_layer
-
-class ConvUpsampleBlock(nn.Module):
-    """Convolution followed by Upsample
-    """
-    def __init__(self, in_channels, out_channels, upsample_type="conv_transpose", conv_type="normal", deconv_kernel=4, deconv_init_bilinear=True, **kwargs):
-        super().__init__()
-        self.conv = _make_conv(in_channels, out_channels, conv_type=conv_type)
-        self.upsample = _make_upsample(upsample_type, deconv_channels=out_channels, deconv_kernel=deconv_kernel, deconv_init_bilinear=deconv_init_bilinear)
-
-    def forward(self, x):
-        out = self.conv(x)
-        out = self.upsample(out)
-        return out
-
 class SimpleNeck(nn.Module):
-    """ResNet/MobileNet with upsample stage (first proposed in PoseNet https://arxiv.org/abs/1804.06208)
+    """(conv + upsample) a few times (first proposed in PoseNet https://arxiv.org/abs/1804.06208)
     """
-    # Reference implementations
-    # CenterNet: https://github.com/xingyizhou/CenterNet/blob/master/src/lib/models/networks/resnet_dcn.py
-    # Original: https://github.com/microsoft/human-pose-estimation.pytorch/blob/master/lib/models/pose_resnet.py
-    # TensorFlow: https://github.com/tensorflow/models/blob/master/research/object_detection/models/center_net_re.py
-    # upsample parameters (channels and kernels) are from CenterNet
-
     def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], conv_type="normal", upsample_type="conv_transpose", **kwargs):
         super().__init__()
-        
-        # build upsample stage
-        conv_upsample_layers = []
-        conv_up_layer = ConvUpsampleBlock(backbone_channels[-1], upsample_channels[0], upsample_type=upsample_type, conv_type=conv_type, **kwargs)
-        # conv_up_layer = nn.Sequential(
-        #     _make_conv(backbone_channels[-1], upsample_channels[0], conv_type=conv_type),
-        #     _make_upsample(upsample_type, upsample_channels[0], **kwargs)
-        # )
-        conv_upsample_layers.append(conv_up_layer)
+        layers = []
+
+        # first (conv + upsample) from backbone
+        conv_layer = make_conv(backbone_channels[-1], upsample_channels[0], conv_type=conv_type),
+        up_layer = make_upsample(upsample_type, upsample_channels[0], **kwargs)
+        layers.append(conv_layer)
+        layers.append(up_layer)
 
         for i in range(1, len(upsample_channels)):
-            conv_up_layer = ConvUpsampleBlock(upsample_channels[i-1], upsample_channels[i], upsample_type=upsample_type, conv_type=conv_type, **kwargs)
-            conv_upsample_layers.append(conv_up_layer)
+            conv_layer = make_conv(upsample_channels[i-1], upsample_channels[i], conv_type=conv_type),
+            up_layer = make_upsample(upsample_type, upsample_channels[i], **kwargs)
+            layers.append(conv_layer)
+            layers.append(up_layer)
 
-        self.upsample = nn.Sequential(*conv_upsample_layers)
+        self.upsample = nn.Sequential(*layers)
         self.out_channels = upsample_channels[-1]
         self.upsample_stride = 2**len(upsample_channels)
 
     def forward(self, x):
         out = self.upsample(x)
-
         return out
 
 class FPNNeck(nn.Module):
@@ -161,12 +66,12 @@ class FPNNeck(nn.Module):
             self.skip_connections.append(skip_conv)
 
             # build upsample layers
-            upsample = _make_upsample(upsample_type=upsample_type, deconv_channels=out_channels, **kwargs)
+            upsample = make_upsample(upsample_type=upsample_type, deconv_channels=out_channels, **kwargs)
             self.up_layers.append(upsample)
 
             # build output conv layers
             out_conv_channels = upsample_channels[i+1] if i < len(upsample_channels)-1 else upsample_channels[-1]
-            conv = _make_conv(out_channels, out_conv_channels, conv_type=conv_type, **kwargs)
+            conv = make_conv(out_channels, out_conv_channels, conv_type=conv_type, **kwargs)
             self.conv_layers.append(conv)
 
         self.out_channels = upsample_channels[-1]
@@ -187,48 +92,6 @@ class FPNNeck(nn.Module):
                 out = skip + up
             out = self.conv_layers[i](out)          # output conv
 
-        return out
-
-class Fuse(nn.Module):
-    """Fusion node to be used for feature fusion. The last input will be resized.
-
-    Formula
-        non-weight: out = conv(in1 + resize(in2))
-        weighted: out = conv((in1*w1 + resize(in2)*w2) / (w1 + w2 + eps))
-    """
-    def __init__(self, in_channels, out, resize, upsample="nearest", downsample="max", conv_type="normal", weighted_fusion=False):
-        super().__init__()
-        assert resize in ("up", "down")
-
-        self.project = nn.ModuleList()
-        for in_c in in_channels:
-            project_conv = nn.Conv2d(in_c, out, 1) if in_c != out else None # match output channels
-            self.project.append(project_conv)
-        if resize == "up":
-            self.resize = _make_upsample(upsample_type=upsample, deconv_channels=out)
-        else:
-            self.resize = _make_downsample(downsample=downsample, conv_channels=out)
-        self.output_conv = _make_conv(out, out, conv_type=conv_type)
-        
-        self.weights = nn.Parameter(torch.ones(len(in_channels)), requires_grad=True) if weighted_fusion else None
-
-    def forward(self, *features, eps=1e-6):
-        out = []
-        for project, x in zip(self.project, features):
-            out.append(project(x) if project is not None else x)
-        
-        out[-1] = self.resize(out[-1])
-
-        # weighted fusion
-        if self.weights is not None:
-            weights = F.relu(self.weights)
-            out = torch.stack([out[i]*weights[i] for i in range(len(out))], dim=-1)
-            out = torch.sum(out, dim=-1) / (torch.sum(weights) + eps)
-        else:
-            out = torch.stack(out, dim=-1)
-            out = torch.sum(out, dim=-1)
-        
-        out = self.output_conv(out)
         return out
 
 class IDANeck(nn.Module):
