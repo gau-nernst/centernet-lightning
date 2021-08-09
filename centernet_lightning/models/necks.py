@@ -9,19 +9,24 @@ from ..utils import load_config
 
 class SimpleNeck(nn.Module):
     """(conv + upsample) a few times (first proposed in PoseNet https://arxiv.org/abs/1804.06208)
+
+    Equations
+        stride 16: out_4 = up(conv(in_5))
+        stride 8: out_3 = up(conv(out_4))
+        stride 4: out_2 = up(conv(out_3))
     """
     def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], conv_type="normal", upsample_type="conv_transpose", **kwargs):
         super().__init__()
         layers = []
 
         # first (conv + upsample) from backbone
-        conv_layer = make_conv(backbone_channels[-1], upsample_channels[0], conv_type=conv_type),
+        conv_layer = make_conv(backbone_channels[-1], upsample_channels[0], conv_type=conv_type)
         up_layer = make_upsample(upsample_type, upsample_channels[0], **kwargs)
         layers.append(conv_layer)
         layers.append(up_layer)
 
         for i in range(1, len(upsample_channels)):
-            conv_layer = make_conv(upsample_channels[i-1], upsample_channels[i], conv_type=conv_type),
+            conv_layer = make_conv(upsample_channels[i-1], upsample_channels[i], conv_type=conv_type)
             up_layer = make_upsample(upsample_type, upsample_channels[i], **kwargs)
             layers.append(conv_layer)
             layers.append(up_layer)
@@ -39,11 +44,11 @@ class FPNNeck(nn.Module):
         - Weighted fusion is used in Bi-FPN: https://arxiv.org/abs/1911.09070
         - Fusion factor (same as weighted fusion): https://arxiv.org/abs/2011.02298
 
-    Formulation
-          16x16: out_5 = conv_skip(in_5)
-          32x32: out_4 = conv(skip(in_4) + up(out_5) x w_4)
-          64x64: out_3 = conv(skip(in_3) + up(out_4) x w_3)
-        128x128: out_2 = conv(skip(in_2) + up(out_3) x w_2)
+    Equations
+        stride 32: out_5 = conv_skip(in_5)
+        stride 16: out_4 = conv(skip(in_4) + up(out_5) x w_4)
+        stride 8: out_3 = conv(skip(in_3) + up(out_4) x w_3)
+        stride 4: out_2 = conv(skip(in_2) + up(out_3) x w_2)
     """
     def __init__(self, backbone_channels, upsample_channels=[256, 128, 64], upsample_type="nearest", conv_type="normal", weighted_fusion=False, **kwargs):
         super().__init__()
