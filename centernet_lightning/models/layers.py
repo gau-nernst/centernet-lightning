@@ -3,26 +3,71 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn.modules.utils import _pair
+from torchvision.ops import DeformConv2d
 
-class DeformableConv2d(nn.Module):
-    pass
+class DeformableConv2dBlock(nn.Module):
+    # https://github.com/msracver/Deformable-ConvNets/blob/master/DCNv2_op/example_symbol.py
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, mask_activation=None):
+        super().__init__()
+        kernel_size = _pair(kernel_size)
+        if mask_activation is None:
+            mask_activation = nn.Sigmoid
+        
+        self.mask_activation = mask_activation()
 
-def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, **kwargs):
+        num_locations = kernel_size[0] * kernel_size[1]
+        self.offset_conv = nn.Conv2d(in_channels, 2*num_locations, kernel_size, stride=stride, padding=padding)
+        self.mask_conv = nn.Conv2d(in_channels, num_locations, kernel_size, stride=stride, padding=padding)
+        self.deform_conv = DeformConv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
+
+        nn.init.constant_(self.offset_conv.weight, 0)
+        nn.init.constant_(self.offset_conv.bias, 0)
+        nn.init.constant_(self.mask_conv.weight, 0)
+        nn.init.constant_(self.mask_conv.bias, 0)
+        
+    def forward(self, input):
+        offset = self.offset_conv(input)
+        mask = self.mask_conv(input)
+        mask = self.mask_activation(mask)
+
+        out = self.deform_conv(input, offset, mask)
+        return out
+
+def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, mask_activation=torch.sigmoid, depth_multiplier=1, **kwargs):
     """Create a convolution layer. Options: deformable, separable, or normal convolution
     """
-    assert conv_type in ("dcn", "separable", "normal")
+    assert conv_type in ("deformable", "separable", "normal")
 
-    if conv_type == "dcn":          # deformable convolution
-        raise NotImplementedError()
-    elif conv_type == "separable":  # depthwise-separable convolution
-        raise NotImplementedError()
+    if conv_type == "deformable":
+        conv_layer = nn.Sequential(
+            DeformableConv2dBlock(in_channels, out_channels, kernel_size, padding=(kernel_size-1)//2, mask_activation=mask_activation),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    elif conv_type == "separable": 
+        hidden_channels = in_channels * depth_multiplier
+        conv_layer = nn.Sequential(
+            # dw
+            nn.Conv2d(in_channels, hidden_channels, kernel_size, padding=(kernel_size-1)//2, groups=in_channels, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU6(inplace=True),
+            # pw
+            nn.Conv2d(hidden_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU6(inplace=True)
+        )
+        nn.init.kaiming_normal_(conv_layer[0].weight, mode="fan_out", nonlinearity="relu")
+        nn.init.kaiming_normal_(conv_layer[3].weight, mode="fan_out", nonlinearity="relu")
+        
     else:                           # normal convolution
-        conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=1, bias=False)
-        bn = nn.BatchNorm2d(out_channels)
-        relu = nn.ReLU(inplace=True)
-        conv_layer = nn.Sequential(conv, bn, relu)
-
-        nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
+        conv_layer = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, padding=(kernel_size-1)//2, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        nn.init.kaiming_normal_(conv_layer[0].weight, mode="fan_out", nonlinearity="relu")
 
     return conv_layer
 
