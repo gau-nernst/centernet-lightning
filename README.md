@@ -101,7 +101,7 @@ model.eval()
 # turn off gradient calculation and do forward pass
 with torch.no_grad():
     encoded_outputs = model(img.unsqueeze(0))
-    detections = model.decode_detections(encoded_outputs)
+    detections = model.gather_detection2d(encoded_outputs)
 ```
 
 `detections` has the same format as above, but the values are `torch.Tensor`.

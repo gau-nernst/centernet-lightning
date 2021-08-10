@@ -100,7 +100,7 @@ class Tracker:
         heatmap, box_2d, reid = self.model(images)
 
         # gather new detections and their embeddings
-        new_detections = self.model.decode_tracking(
+        new_detections = self.model.gather_tracking2d(
             heatmap, box_2d, reid, 
             nms_kernel=nms_kernel, num_detections=num_detections, normalize_bbox=True
         )

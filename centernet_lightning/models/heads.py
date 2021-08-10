@@ -3,6 +3,7 @@ from typing import Dict, Union
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from ..losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
 from ..losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
@@ -45,19 +46,37 @@ class HeatmapHead(BaseHead):
         self.loss_weight = loss_weight
 
     def compute_loss(self, pred, target, eps=1e-8):
-        # overall steps
-        # 1. calculate target heatmap
-        # 2. apply loss
         heatmap = pred["heatmap"]
         bboxes = target["bboxes"]
         labels = target["labels"]
         mask = target["mask"]
 
-        target_heatmap = self._render_target_heatmap(heatmap.shape, bboxes, labels, mask, device=heatmap.device)
-
-        loss = self.loss_function(heatmap, target_heatmap) / (mask.sum() + eps)
+        target_heatmap = self._render_target_heatmap(heatmap.shape, bboxes, labels, mask, device=heatmap.device)    # target heatmap
+        loss = self.loss_function(heatmap, target_heatmap) / (mask.sum() + eps)                                     # apply focal loss
 
         return loss
+
+    @classmethod
+    def gather_topk(cls, heatmap: torch.Tensor, nms_kernel=3, num_detections=100):
+        """Gather top k detections from heatmap
+        """
+        batch_size = heatmap.shape[0]
+
+        # 1. pseudo-nms via max pool
+        padding = (nms_kernel - 1) // 2
+        nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
+        heatmap = heatmap * nms_mask
+        
+        # 2. since box regression is shared, we only consider the best candidate at each heatmap location
+        heatmap, labels = torch.max(heatmap, dim=1)
+
+        # 3. flatten to run topk
+        heatmap = heatmap.view(batch_size, -1)
+        labels = labels.view(batch_size, -1)
+        topk_scores, topk_indices = torch.topk(heatmap, num_detections)
+        topk_labels = torch.gather(labels, dim=-1, index=topk_indices)
+
+        return topk_scores, topk_indices, topk_labels
 
     def _render_target_heatmap(self, heatmap_shape, bboxes, labels, mask, min_overlap=0.3, alpha=0.54, method=None, device="cpu", eps=1e-8):
         """Render target heatmap for a batch of images
@@ -77,6 +96,7 @@ class HeatmapHead(BaseHead):
         labels = labels.cpu().numpy()
         mask = mask.cpu().numpy()
 
+        # scale up to output heatmap dimensions
         x_indices = (bboxes[...,0] * heatmap_width).astype(np.int32)
         y_indices = (bboxes[...,1] * heatmap_height).astype(np.int32)
         widths = bboxes[...,2] * heatmap_width
@@ -161,11 +181,6 @@ class Box2DHead(BaseHead):
         self.loss_weight = loss_weight
 
     def compute_loss(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor], eps=1e-8):
-        # overall steps
-        # 1. calculate quantized (integer) box centers locations
-        # 2. gather outputs along box center locations
-        # 3. calculate predicted box coordinates
-        # 4. apply loss function
         pred_box_map = pred["box_2d"]   # NCHW
         target_box = target["bboxes"]   # N x num_detections x 4, cxcywh format
         mask = target["mask"]           # N x num_detections
@@ -187,7 +202,7 @@ class Box2DHead(BaseHead):
         pred_box_map = pred_box_map.view(batch_size, channels, -1)          # flatten
         pred_box = torch.gather(pred_box_map, dim=-1, index=xy_indices)
 
-        # 3. quantized xy (floor) aligned to center of the cell (+0.5)
+        # 3. quantized xy (floor) and align to center of the cell (+0.5)
         aligned_x = torch.floor(target_box[...,0]) + 0.5
         aligned_y = torch.floor(target_box[...,1]) + 0.5
         pred_box[:,0,:] = aligned_x - pred_box[:,0,:]   # x1 = x - left
@@ -201,6 +216,32 @@ class Box2DHead(BaseHead):
         loss = self.loss_function(pred_box, target_box) * mask.unsqueeze(-1)
         loss = loss.sum() / (mask.sum() + eps)
         return loss
+
+    @classmethod
+    def gather_at_indices(cls, box_2d: torch.Tensor, indices, normalize_bbox=False, stride=4):
+        """Gather 2D bounding boxes at given indices
+        """
+        batch_size, _, output_height, output_width = box_2d.shape
+
+        cx = indices % output_width + 0.5
+        cy = indices // output_width + 0.5
+
+        box_2d = box_2d.view(batch_size, 4, -1)
+        x1 = cx - torch.gather(box_2d[:,0], dim=-1, index=indices)    # x1 = cx - left
+        y1 = cy - torch.gather(box_2d[:,1], dim=-1, index=indices)    # y1 = cy - top
+        x2 = cx + torch.gather(box_2d[:,2], dim=-1, index=indices)    # x2 = cx + right
+        y2 = cy + torch.gather(box_2d[:,3], dim=-1, index=indices)    # y2 = cy + bottom
+
+        topk_bboxes = torch.stack([x1, y1, x2, y2], dim=-1)
+        if normalize_bbox:
+            # normalize to [0,1]
+            topk_bboxes[...,[0,2]] /= output_width
+            topk_bboxes[...,[1,3]] /= output_height    
+        else:
+            # convert to input image coordinates
+            topk_bboxes *= stride
+        
+        return topk_bboxes
 
 class ReIDHead(BaseHead):
     """FairMOT head. Paper: https://arxiv.org/abs/2004.01888
@@ -248,6 +289,18 @@ class ReIDHead(BaseHead):
         loss = loss.sum() / (mask.sum() + eps)
 
         return loss
+
+    @classmethod
+    def gather_at_indices(cls, reid: torch.Tensor, indices: torch.Tensor):
+        """Gather ReID embeddings at given indices
+        """
+        batch_size, embedding_size, _, _ = reid.shape
+
+        reid = reid.view(batch_size, embedding_size, -1)
+        indices = indices.unsqueeze(1).expand(batch_size, embedding_size, -1)
+        embeddings = torch.gather(reid, dim=-1, index=indices)
+        embeddings = embeddings.swapaxes(1,2)
+        return embeddings
 
     def _make_classification_head(self, num_classes):
         # 2-layer MLP

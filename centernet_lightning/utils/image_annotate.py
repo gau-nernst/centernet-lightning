@@ -201,7 +201,7 @@ class LogImageCallback(pl.Callback):
             encoded_outputs = pl_module.get_encoded_outputs(img)
             heatmap = torch.sigmoid(encoded_outputs["heatmap"])
             box_2d = encoded_outputs["box_2d"]
-            pred_detections = pl_module.decode_detection(heatmap, box_2d)
+            pred_detections = pl_module.gather_detection2d(heatmap, box_2d)
 
             for k in detections_pred.keys():
                 detections_pred[k].append(pred_detections[k][0].cpu().numpy())

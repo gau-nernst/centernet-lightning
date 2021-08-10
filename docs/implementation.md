@@ -77,8 +77,8 @@ Method | Description
 `get_encoded_outputs()` | Forward pass and return a dictionary. The keys depend on the task. Heatmap output is before sigmoid (logits). This is used in training i.e. computing loss.
 `forward()` | Forward pass and return a namedtuple to make the model export-friendly. Heatmap output is after sigmoid (confidence score). This is used in inference.
 `compute_loss()` | Pass in the encoded outputs to calculate losses for each output head and total loss
-`decode_detection/tracking()` | Pass in the encoded outputs to gather top-k center points from heatmap, and decode to bboxes, labels, and scores predictions (also ReID embedding for tracking).
-`inference_detection/tracking()` | Run inference on a folder of images.
+`gather_detection2d/tracking2d()` | Pass in the encoded outputs to gather top-k center points from heatmap, and decode to bboxes, labels, and scores predictions (also ReID embedding for tracking).
+`inference_detection2d/tracking2d()` | Run inference on a folder of images.
 
 ## Implementation notes
 
