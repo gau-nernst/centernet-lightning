@@ -1,6 +1,6 @@
 # CenterNet
 
-CenterNet is a strong **single-stage**, **single-scale**, and **anchor-free** object detector. This implementation is built with PyTorch Lightning, supports TorchScript and ONNX export, and has modular design to make it simple customizing the components.
+CenterNet is a strong **single-stage**, **single-scale**, and **anchor-free** object detector. This implementation is built with PyTorch Lightning, supports TorchScript and ONNX export, and has modular design to make customizing components simple.
 
 References
 
@@ -17,8 +17,8 @@ To read more about the architecture and code structure of this implementation, s
 Clone this repo and navigate to the repo directory
 
 ```bash
-git clone <THIS_REPO_GIT_URL>
-cd CenterNet
+git clone https://github.com/gau-nernst/centernet-lightning.git
+cd centernet-lightning
 ```
 
 Install using `environment.yml`
