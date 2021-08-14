@@ -49,7 +49,7 @@ def parse_transforms(config: Dict[str, Dict], format="yolo", task="detection"):
         t = A.__dict__[t_config["name"]](**t_config["params"])
         transforms.append(t)
 
-    transforms.append(A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255))
+    # transforms.append(A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD, max_pixel_value=255))
     transforms.append(ToTensorV2())
 
     label_fields = ["labels", "ids"] if task == "tracking" else ["labels"]

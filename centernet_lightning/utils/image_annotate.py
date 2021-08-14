@@ -186,7 +186,8 @@ class LogImageCallback(pl.Callback):
         for item in self.dataset:
             # save image to make a grid later
             img = item["image"]
-            img_np = img.clone().numpy().transpose(1,2,0) * self.imagenet_std + self.imagenet_mean
+            # img_np = img.clone().numpy().transpose(1,2,0) * self.imagenet_std + self.imagenet_mean
+            img_np = img.clone().numpy().transpose(1,2,0)
             images.append(img_np)
             
             # save ground truth bboxes and labels
