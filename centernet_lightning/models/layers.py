@@ -8,40 +8,47 @@ from torchvision.ops import DeformConv2d
 
 class DeformableConv2dBlock(nn.Module):
     # https://github.com/msracver/Deformable-ConvNets/blob/master/DCNv2_op/example_symbol.py
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, mask_activation=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, mask_activation=None, version=2, mask_init_bias=0):
         super().__init__()
         kernel_size = _pair(kernel_size)
         if mask_activation is None:
             mask_activation = nn.Sigmoid
+        elif isinstance(mask_activation, str):
+            mask_activation = nn.__dict__[mask_activation]
         
-        self.mask_activation = mask_activation()
-
         num_locations = kernel_size[0] * kernel_size[1]
         self.offset_conv = nn.Conv2d(in_channels, 2*num_locations, kernel_size, stride=stride, padding=padding)
-        self.mask_conv = nn.Conv2d(in_channels, num_locations, kernel_size, stride=stride, padding=padding)
+        self.mask_conv = nn.Sequential(
+            nn.Conv2d(in_channels, num_locations, kernel_size, stride=stride, padding=padding),
+            mask_activation()
+        ) if version == 2 else None
         self.deform_conv = DeformConv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
 
         nn.init.constant_(self.offset_conv.weight, 0)
         nn.init.constant_(self.offset_conv.bias, 0)
-        nn.init.constant_(self.mask_conv.weight, 0)
-        nn.init.constant_(self.mask_conv.bias, 0)
+        if self.mask_conv is not None:
+            nn.init.constant_(self.mask_conv[0].weight, 0)
+            nn.init.constant_(self.mask_conv[0].bias, mask_init_bias)
         
     def forward(self, input):
         offset = self.offset_conv(input)
-        mask = self.mask_conv(input)
-        mask = self.mask_activation(mask)
+        mask = self.mask_conv(input) if self.mask_conv is not None else None
 
         out = self.deform_conv(input, offset, mask)
         return out
 
-def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, mask_activation=torch.sigmoid, depth_multiplier=1, **kwargs):
+def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, mask_activation=None, version=2, mask_init_bias=0, depth_multiplier=1, **kwargs):
     """Create a convolution layer. Options: deformable, separable, or normal convolution
     """
     assert conv_type in ("deformable", "separable", "normal")
+    padding = (kernel_size-1)//2
 
     if conv_type == "deformable":
         conv_layer = nn.Sequential(
-            DeformableConv2dBlock(in_channels, out_channels, kernel_size, padding=(kernel_size-1)//2, mask_activation=mask_activation),
+            DeformableConv2dBlock(
+                in_channels, out_channels, kernel_size, padding=padding, bias=False,
+                mask_activation=mask_activation, version=version, mask_init_bias=mask_init_bias
+            ),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
@@ -50,7 +57,7 @@ def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, mask
         hidden_channels = in_channels * depth_multiplier
         conv_layer = nn.Sequential(
             # dw
-            nn.Conv2d(in_channels, hidden_channels, kernel_size, padding=(kernel_size-1)//2, groups=in_channels, bias=False),
+            nn.Conv2d(in_channels, hidden_channels, kernel_size, padding=padding, groups=in_channels, bias=False),
             nn.BatchNorm2d(in_channels),
             nn.ReLU6(inplace=True),
             # pw
@@ -63,7 +70,7 @@ def make_conv(in_channels, out_channels, conv_type="normal", kernel_size=3, mask
         
     else:                           # normal convolution
         conv_layer = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size, padding=(kernel_size-1)//2, bias=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
