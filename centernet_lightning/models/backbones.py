@@ -14,9 +14,9 @@ _backbone_channels = {
     "resnet50": [256, 512, 1024, 2048],
     "resnet101": [256, 512, 1024, 2048],
 
-    "mobilenet_v2": [16, 24, 32, 96, 1280],
-    "mobilenet_v3_small": [16, 16, 24, 48, 576],
-    "mobilenet_v3_large": [16, 24, 40, 112, 960]
+    "mobilenet_v2": [16, 24, 32, 96, 320],
+    "mobilenet_v3_small": [16, 16, 24, 48, 96],
+    "mobilenet_v3_large": [16, 24, 40, 112, 160]
 }
 
 class ResNetBackbone(nn.Module):
