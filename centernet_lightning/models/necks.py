@@ -194,7 +194,7 @@ class BiFPNNeck(nn.Module):
 
     def forward(self, features):
         out = [project(x) for project, x in zip(self.project, features[-self.num_features:])]
-        print(len(out))
+
         for bifpn_layer in self.layers:
             out = bifpn_layer(out)
         
