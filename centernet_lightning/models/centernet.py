@@ -36,7 +36,7 @@ class CenterNet(pl.LightningModule):
         """
         super().__init__()
 
-        return_features = True if neck["name"] in ("fpn") else False
+        return_features = True if neck["name"] in ("fpn", "bifpn", "ida") else False
         self.backbone = build_backbone(backbone, return_features=return_features)
         self.neck = build_neck(neck, backbone_channels=self.backbone.out_channels)
         self.output_heads = build_output_heads(output_heads, in_channels=self.neck.out_channels)
@@ -219,34 +219,38 @@ class CenterNet(pl.LightningModule):
 
     def configure_optimizers(self):
         if self.optimizer_cfg is None:
-            warnings.warn("Optimizer config was not specified. Using adam optimizer with lr=1e-3")
-            optimizer_params = dict(lr=1e-3)
-            self.optimizer_cfg = dict(name="Adam", params=optimizer_params)
+            warnings.warn("Optimizer config was not specified. Using AdamW optimizer with lr=5e-4")
+            optimizer_params = dict(lr=5e-4)
+            self.optimizer_cfg = dict(name="AdamW", params=optimizer_params)
 
-        optimizer_algo = torch.optim.__dict__[self.optimizer_cfg["name"]]
-        optimizer = optimizer_algo(self.parameters(), **self.optimizer_cfg["params"])
+        optimizer_class = torch.optim.__dict__[self.optimizer_cfg["name"]]
+        optimizer = optimizer_class(self.parameters(), **self.optimizer_cfg["params"])
 
         if self.lr_scheduler_cfg is None:
             return optimizer
-        
-        # NOTE: need a better way to manage lr_schedulers
-        # - some lr schedulers need info about training -> cannot provide from config file e.g. OneCycleLR
-        # - support for multiple lr schedulers
-        lr_scheduler_algo = torch.optim.lr_scheduler.__dict__[self.lr_scheduler_cfg["name"]]
-        if self.lr_scheduler_cfg["name"] in ("OneCycleLR"):
-            lr_scheduler = lr_scheduler_algo(optimizer, epochs=self.trainer.max_epochs, steps_per_epoch=self.get_steps_per_epoch(), **self.lr_scheduler_cfg["params"])
-        else:
-            lr_scheduler = lr_scheduler_algo(optimizer, **self.lr_scheduler_cfg["params"])
+            
+        scheduler_class = torch.optim.lr_scheduler.__dict__[self.lr_scheduler_cfg["name"]]
+        if self.lr_scheduler_cfg["name"] == "OneCycleLR":
+            self.lr_scheduler_cfg["params"]["max_lr"] = self.optimizer_cfg["params"]["lr"]
+            lr_scheduler = scheduler_class(optimizer, epochs=self.trainer.max_epochs, steps_per_epoch=self.get_steps_per_epoch(), **self.lr_scheduler_cfg["params"])
 
-        # override default behavior to update lr every step instead of epoch
-        return_dict = {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": lr_scheduler,
-                "interval": "step",
-                "frequency": 1
+            # OneCycleLR should be called every train step (per batch)
+            return_dict = {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": lr_scheduler,
+                    "interval": "step",
+                    "frequency": 1
+                }
             }
-        }
+
+        else:
+            lr_scheduler = scheduler_class(optimizer, **self.lr_scheduler_cfg["params"])
+            return_dict = {
+                "optimizer": optimizer,
+                "lr_scheduler": lr_scheduler
+            }
+
         return return_dict
 
     def gather_detection2d(self, heatmap: torch.Tensor, box_2d: torch.Tensor, num_detections: int = 100, nms_kernel: int = 3, normalize_bbox: bool = False):
