@@ -1,186 +1,99 @@
-import os
 import random
 
-import yaml
+import pytest
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 from centernet_lightning.datasets import COCODataset, VOCDataset, CrowdHumanDataset, MOTTrackingSequence, MOTTrackingDataset, KITTITrackingSequence, KITTITrackingDataset
 from centernet_lightning.datasets.utils import get_default_detection_transforms, get_default_tracking_transforms, CollateDetection, CollateTracking
 from centernet_lightning.datasets.builder import build_dataset, build_dataloader
 
-COCO_DIR = "datasets/COCO"
-VOC_DIR = "datasets/VOC2012"
-CROWDHUMAN_DIR = "datasets/CrowdHuman"
+def generate_detection_dataset_configs():
+    pass
 
-MOT_TRACKING_DIR = "datasets/MOT/MOT17/train"
-KITTI_TRACKING_DIR = "datasets/KITTI/tracking/training"
+def generate_tracking_dataset_configs():
+    pass
 
-sample_detection_config = "configs/base_resnet34.yaml"
-sample_tracking_config = "configs/base_tracking_resnet34.yaml"
+class TestDetectionDataset:
+    dataset_configs = generate_detection_dataset_configs()
 
-def _test_detection_dataset(dataset, augmented=False):
-    for _ in range(10):
-        rand_idx = random.randint(0, len(dataset)-1)
-        sample = dataset[rand_idx]
-        for x in ["image", "bboxes", "labels"]:
-            assert x in sample
+    def test_attributes(self, constructor, data_dir, split, name_to_label):
+        dataset = constructor(data_dir, split, name_to_label)
 
-        img = sample["image"]
-        assert len(img.shape) == 3
-        if augmented:
-            assert isinstance(img, torch.Tensor)
-            assert img.shape[0] == 3
-            assert img.dtype == torch.float32
+        assert isinstance(len(dataset), int)
+
+    def test_get_item(self, constructor, data_dir, split, name_to_label):
+        dataset = constructor(data_dir, split, name_to_label)
         
-        else:
-            assert isinstance(img, np.ndarray)
-            assert img.shape[-1] == 3
-            assert img.dtype == np.uint8
+        for item in random.sample(dataset, 10):
+            assert isinstance(item["image"], np.ndarray)
+            assert item["image"].shape[-1] == 3
 
-        bboxes = sample["bboxes"]
-        for box in bboxes:
-            assert len(box) == 4
-            assert 0 < box[0] <= 1
-            assert 0 < box[1] <= 1
-            assert 0 < box[2] <= 1
-            assert 0 < box[3] <= 1
-        
-        labels = sample["labels"]
-        assert len(bboxes) == len(labels)
-
-def _test_tracking_dataset(dataset, augmented=False):
-    for _ in range(10):
-        rand_idx = random.randint(0, len(dataset)-1)
-        sample = dataset[rand_idx]
-        for x in ["image", "bboxes", "labels", "ids"]:
-            assert x in sample
-
-        img = sample["image"]
-        assert len(img.shape) == 3
-        if augmented:
-            assert isinstance(img, torch.Tensor)
-            assert img.shape[0] == 3
-            assert img.dtype == torch.float32
-        
-        else:
-            assert isinstance(img, np.ndarray)
-            assert img.shape[-1] == 3
-            assert img.dtype == np.uint8
-
-        bboxes = sample["bboxes"]
-        for box in bboxes:
-            assert len(box) == 4
-            assert 0 <= box[0] <= 1
-            assert 0 <= box[1] <= 1
-            assert 0 < box[2] <= 1
-            assert 0 < box[3] <= 1
-        
-        labels = sample["labels"]
-        assert len(bboxes) == len(labels)
-
-        ids = sample["ids"]
-        assert len(ids) == len(labels)
-
-class TestDetectionDatasets:
-    def test_coco_dataset(self):
-        ds = COCODataset(COCO_DIR, "val2017")
-        _test_detection_dataset(ds, augmented=False)
+            assert isinstance(item["bboxes"], list)
+            for box in item["bboxes"]:
+                assert len(box) == 4
+                for x in box:
+                    assert 0 <= x <= 1
+            
+            assert isinstance(item["labels"], list)
+            assert len(item["labels"]) == len(item["bboxes"])
 
         transforms = get_default_detection_transforms()
-        ds = COCODataset(COCO_DIR, "val2017", transforms=transforms)
-        _test_detection_dataset(ds, augmented=True)
+        dataset = constructor(data_dir, split, name_to_label, transforms=transforms)
+        
+        for item in random.sample(dataset, 10):
+            assert isinstance(item["image"], torch.Tensor)
+            assert item["image"].shape[0] == 3
 
-    def test_voc_dataset(self):
-        ds = VOCDataset(VOC_DIR, "val")
-        _test_detection_dataset(ds, augmented=False)
+            assert isinstance(item["bboxes"], tuple)
+            assert isinstance(item["labels"], tuple)
+            assert len(item["bboxes"]) == len(item["labels"])
 
+    def test_dataloader(self, constructor, data_dir, split, name_to_label):
+        batch_size = 4
         transforms = get_default_detection_transforms()
-        ds = VOCDataset(VOC_DIR, "val", transforms=transforms)
-        _test_detection_dataset(ds, augmented=True)
-
-    def test_crowdhuman_dataset(self):
-        ds = CrowdHumanDataset(CROWDHUMAN_DIR, "val")
-        _test_detection_dataset(ds, augmented=False)
-
-        transforms = get_default_detection_transforms()
-        ds = CrowdHumanDataset(CROWDHUMAN_DIR, "val", transforms=transforms)
-        _test_detection_dataset(ds, augmented=True)
-
-class TestTrackingDatasets:
-    def test_mot_dataset(self):
-        names = os.listdir(MOT_TRACKING_DIR)
-        sorted(names)
-
-        ds = MOTTrackingSequence(MOT_TRACKING_DIR, names[0])
-        _test_tracking_dataset(ds, augmented=False)
-        ds = MOTTrackingDataset(MOT_TRACKING_DIR, names)
-        _test_tracking_dataset(ds, augmented=False)
-
-        transforms = get_default_tracking_transforms()
-        ds = MOTTrackingSequence(MOT_TRACKING_DIR, names[0], transforms=transforms)
-        _test_tracking_dataset(ds, augmented=True)
-        ds = MOTTrackingDataset(MOT_TRACKING_DIR, names, transforms=transforms)
-        _test_tracking_dataset(ds, augmented=True)
-    
-    def test_kitti_dataset(self):
-        names = os.listdir(os.path.join(KITTI_TRACKING_DIR, "image_02"))
-        sorted(names)
-
-        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, names[0])
-        _test_tracking_dataset(ds, augmented=False)
-        ds = KITTITrackingDataset(KITTI_TRACKING_DIR, names)
-        _test_tracking_dataset(ds, augmented=False)
-
-        transforms = get_default_tracking_transforms()
-        ds = KITTITrackingSequence(KITTI_TRACKING_DIR, names[0], transforms=transforms)
-        _test_tracking_dataset(ds, augmented=True)
-        ds = KITTITrackingDataset(KITTI_TRACKING_DIR, names, transforms=transforms)
-        _test_tracking_dataset(ds, augmented=True)
-
-def _get_dataset_config(config_path):
-    with open(config_path, "r") as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-
-    return config["data"]["train"]["dataset"]
-
-def _get_dataloader_config(config_path):
-    with open(config_path, "r") as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-
-    return config["data"]["train"]
-
-class TestBuilder:
-    def test_dataset_builder(self):
-        config = _get_dataset_config(sample_detection_config)
-        dataset = build_dataset(config)
-        assert isinstance(dataset, COCODataset)
-
-        config = _get_dataset_config(sample_tracking_config)
-        dataset = build_dataset(config)
-        assert isinstance(dataset, MOTTrackingDataset)
-
-    def test_dataloader_builder(self):
-        config = _get_dataloader_config(sample_detection_config)
-        dataloader = build_dataloader(config)
+        collate_fn = CollateDetection()
+        
+        dataset = constructor(data_dir, split, name_to_label, transforms=transforms)
+        dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
         batch = next(iter(dataloader))
 
-        for x in ["image", "bboxes", "labels", "mask"]:
-            assert x in batch
-
-        assert len(batch["image"].shape) == 4
-        assert batch["bboxes"].shape[1] == batch["labels"].shape[1]
-        assert batch["bboxes"].shape[1] == batch["mask"].shape[1]
-
-        config = _get_dataloader_config(sample_tracking_config)
-        dataloader = build_dataloader(config)
-        batch = next(iter(dataloader))
-
-        for x in ["image", "bboxes", "labels", "ids", "mask"]:
-            assert x in batch
-
-        assert len(batch["image"].shape) == 4
-        assert batch["bboxes"].shape[1] == batch["labels"].shape[1]
-        assert batch["bboxes"].shape[1] == batch["ids"].shape[1]
-        assert batch["bboxes"].shape[1] == batch["mask"].shape[1]
+        img = batch["image"]
+        assert isinstance(img, torch.Tensor)
+        assert img.shape[0] == batch_size
         
+        bboxes = batch["bboxes"]
+        assert isinstance(bboxes, torch.Tensor)
+        assert bboxes.shape[0] == batch_size
+        assert bboxes.max() <= 1
+        assert bboxes.min() >= 0
+
+        labels = batch["labels"]
+        assert isinstance(labels, torch.Tensor)
+        assert labels.shape[0] == batch_size
+
+        mask = batch["mask"]
+        assert isinstance(mask, torch.Tensor)
+        assert mask.shape[0] == batch_size
+        for x in mask.view(-1):
+            assert x == 0 or x == 1
+
+        assert bboxes.shape[1] == labels.shape[1] == mask.shape[1]
+
+    def test_builder(self):
+        pass
+class TestTrackingDataset:
+    dataset_configs = generate_tracking_dataset_configs()
+
+    def test_attributes(self):
+        pass
+
+    def test_get_item(self):
+        pass
+
+    def test_dataloader(self):
+        pass
+
+    def test_builder(self):
+        pass
