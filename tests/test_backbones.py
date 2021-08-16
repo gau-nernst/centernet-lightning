@@ -44,8 +44,8 @@ class TestBackbone:
     def test_attributes(self, constructor, name):
         model = constructor(name)
         
-        assert hasattr(model, "output_stride")
-        assert hasattr(model, "out_channels")
+        assert isinstance(model.output_stride, int)
+        assert isinstance(model.out_channels, list)
 
     def test_forward_single(self, constructor, name, sample_input):
         model = constructor(name, return_features=False)

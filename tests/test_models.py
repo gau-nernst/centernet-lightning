@@ -1,103 +1,108 @@
-import os
-
+import pytest
 import torch
 
-from centernet_lightning.models import CenterNet, build_centernet_from_cfg
-from centernet_lightning.backbones.simple import SimpleBackbone
-from centernet_lightning.datasets import render_target_heatmap_cornernet
+from centernet_lightning.models.centernet import CenterNet, build_centernet
 
-sample_cfg = "configs/coco_resnet34.yaml"
+NUM_CLASSES = 20
 
-sample_input = {
-    "image": torch.rand((4,3,512,512)),
-    "bboxes": torch.rand((4,10,4)),
-    "labels": torch.randint(0,80,(4,10)),
-    "heatmap": torch.rand((4,80,128,128)),
-    "mask": torch.randint(0,2,(4,10))
-}
+@pytest.fixture
+def sample_batch():
+    batch_size = 4
+    return {
+        "image": torch.rand((batch_size,3,512,512)),
+        "bboxes": torch.rand((batch_size,10,4)),
+        "labels": torch.randint(0,NUM_CLASSES,(batch_size,10)),
+        "mask": torch.randint(0,2,(batch_size,10))
+    }
 
-sample_output = {
-    "heatmap": torch.rand((4,80,128,128)),
-    "size": torch.rand((4,2,128,128)) * 128,
-    "offset": torch.rand((4,2,128,128))
-}
+@pytest.fixture
+def sample_model_outputs():
+    return {
+        "heatmap": torch.rand((4,80,128,128)),
+        "box_2d": torch.rand((4,4,128,128)) * 128,
+    }
 
-class TestModels:
-    def test_build_centernet(self):
-        model = build_centernet_from_cfg(sample_cfg)
-        assert isinstance(model, CenterNet)
-        assert isinstance(model.backbone, SimpleBackbone)
+def pytest_generate_tests(metafunc):
+    ids = []
+    arg_names = list(metafunc.cls.model_configs[0][1].keys())
+    arg_values = []
 
-        model(sample_input["image"])
+    for config in metafunc.cls.model_configs:
+        config_id, args = config
+        ids.append(config_id)
+        arg_values.append(args.values())
     
-    # def test_build_all_configs(self):
-    #     configs = os.listdir("configs")
-    #     configs = [os.path.join("configs", cfg) for cfg in configs]
-    #     for cfg in configs:
-    #         model = build_centernet_from_cfg(cfg)
-    #         model(sample_input["image"])
+    metafunc.parametrize(arg_names, arg_values, ids=ids, scope="class")
 
-    def test_forward_pass(self):
-        model = build_centernet_from_cfg(sample_cfg)
-        output = model(sample_input["image"])
+def generate_model_configs():
+    backbones = ["resnet18", "resnet50", "mobilenet_v2"]
+    necks = ["simple", "fpn", "bifpn", "ida"]
+
+    configs = []
+    for b in backbones:
+        for n in necks:
+            config_id = f"{b}-{n}"
+            model_config = {
+                "task": "detection",
+                "backbone": {"name": b},
+                "neck": {"name": n},
+                "output_heads": {
+                    "heatmap": {"num_classes": NUM_CLASSES},
+                    "box_2d": {}
+                }
+            }
+            configs.append((config_id, model_config))
+
+    return configs
+
+class TestModel:
+    model_configs = generate_model_configs()
+
+    def test_attributes(self, backbone, neck, output_heads, task):
+        model = CenterNet(backbone, neck, output_heads, task)
+
+        assert isinstance(model.output_stride, int)
+        assert model.task == task
+        assert model.num_classes == NUM_CLASSES
+
+    def test_get_encoded_outputs(self, backbone, neck, output_heads, task, sample_batch):
+        img = sample_batch["image"]
+        model = CenterNet(backbone, neck, output_heads, task)
+        outputs = model.get_encoded_outputs(img)
         
-        for x in ["heatmap", "size", "offset"]:
-            assert x in output
-            assert not torch.isnan(torch.sum(output[x]))
-        
-        # correct output dimension
-        assert output["heatmap"].shape == (4,80,128,128)
-        assert output["size"].shape == (4,2,128,128)
-        assert output["offset"].shape == (4,2,128,128)
-    
-    def test_compute_loss(self):
-        model = build_centernet_from_cfg(sample_cfg)
-        losses = model.compute_loss(sample_output, sample_input)
+        heatmap = outputs["heatmap"]
+        box_2d = outputs["box_2d"]
+
+        assert isinstance(heatmap, torch.Tensor)
+        assert heatmap.shape[0] == img.shape[0]
+        assert heatmap.shape[1] == NUM_CLASSES
+        assert heatmap.shape[2] == img.shape[2] // model.output_stride
+        assert heatmap.shape[3] == img.shape[3] // model.output_stride
+
+        assert isinstance(box_2d, torch.Tensor)
+        assert box_2d.shape[0] == img.shape[0]
+        assert box_2d.shape[1] == 4
+        assert box_2d.shape[2] == img.shape[2] // model.output_stride
+        assert box_2d.shape[3] == img.shape[3] // model.output_stride
+
+    def test_forward_pass(self, backbone, neck, output_heads, task, sample_batch):
+        img = sample_batch["image"]
+        model = CenterNet(backbone, neck, output_heads, task)
+        heatmap, box_2d = model(img)
+
+        assert isinstance(heatmap, torch.Tensor)
+        assert heatmap.max() <= 1
+        assert heatmap.min() >= 0
+        assert heatmap.shape[1] == NUM_CLASSES
+
+        assert isinstance(box_2d, torch.Tensor)
+        assert box_2d.shape[1] == 4
+
+    def test_compute_loss(self, backbone, neck, output_heads, task, sample_batch, sample_model_outputs):
+        model = CenterNet(backbone, neck, output_heads, task)
+        losses = model.compute_loss(sample_model_outputs, sample_batch)
 
         # correct loss names and loss is not nan
-        for x in ["heatmap", "size", "offset"]:
-            assert x in losses
+        for x in ["heatmap", "box_2d", "total"]:
+            assert isinstance(losses[x], torch.Tensor)
             assert not torch.isnan(losses[x])
-
-    # def test_decode_detections(self):
-    #     bboxes = torch.tensor([[
-    #         [64,64,100,200],
-    #         [64,80,50,100],
-    #         [80,70,100,100]
-    #     ]])
-    #     labels = torch.tensor([[1,0,2]])
-    #     mask = torch.tensor([[1,1,0]])
-        
-    #     x1 = bboxes[0][0][0]
-    #     y1 = bboxes[0][0][1]
-        
-    #     heatmap = render_target_heatmap_cornernet((1,4,128,128), bboxes, labels, mask) * 0.95
-    #     heatmap[0, labels[0][0], y1, x1] = 1                           # make the first point having highest score
-    #     heatmap = -torch.log((1 - heatmap) / (heatmap + 1e-8))      # inverse sigmoid, convert probabilities to logits
-
-    #     pred_size = torch.rand((1,2,128,128)) * 20
-    #     pred_offset = torch.rand((1,2,128,128))
-
-    #     sample_output = {
-    #         "heatmap": heatmap,
-    #         "size": pred_size,
-    #         "offset": pred_offset
-    #     }
-    #     model = build_centernet_from_cfg(sample_cfg)
-    #     output = model.decode_detections(sample_output, num_detections=50)
-
-    #     for x in ["labels", "bboxes", "scores"]:
-    #         assert x in output
-    #         assert output[x].shape[1] == 50
-
-    #     out_label = output["labels"][0][0]
-    #     out_score = output["scores"][0][0]
-    #     out_bbox  = output["bboxes"][0][0]
-
-    #     assert out_label == labels[0][0]
-    #     assert out_score == 1
-
-    #     assert out_bbox[0] == (x1 + pred_offset[0,0,y1,x1]) * model.output_stride
-    #     assert out_bbox[1] == (y1 + pred_offset[0,1,y1,x1]) * model.output_stride
-    #     assert out_bbox[2] == pred_size[0,0,y1,x1]
-    #     assert out_bbox[3] == pred_size[0,1,y1,x1]
