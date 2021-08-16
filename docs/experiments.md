@@ -18,6 +18,8 @@ FPN | AdamW | 5e-3 | 24.3 | -1.5 mAP
 Weighted FPN | AdamW | 5e-4 | 26.3 | +0.5 mAP 
 FPN with DCNv2 | AdamW | 5e-4 | 37.5 | +11.7 mAP
 Bi-FPN | AdamW | 2.5e-4 | 32.1 | +6.3 mAP, Half batch size
+IDA | AdamW | 5e-4 | 27.6 | +1.8 mAP
+Bi-FPN with DCNv2 | AdamW | 2.5e-4 | 39.4 | +13.6 mAP, Half batch size
 
 **Experiment 2** Deformable convolution
 
@@ -56,17 +58,3 @@ Backbone | mAP
 ---------|-----
 MobileNetv2 | 15.4
 MobileNetv3-large | 18.9
-
-Pre-trained vs w/o pre-trained
-
-Heatmap
-
-Quality focal loss
-TTFNet heatmap
-
-Best model possible
-
-- Neck: Bi-FPN with DCNv2
-- Batch size: 64
-- Learning rate: 2.5e-4
-- Other config same as Experiment 1
