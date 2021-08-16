@@ -8,6 +8,11 @@ import pytorch_lightning as pl
 import pytorch_lightning.loggers as pl_loggers
 import pytorch_lightning.callbacks as pl_callbacks
 
+try:
+    import wandb
+except ImportError:
+    pass
+
 from centernet_lightning.models import build_centernet
 from centernet_lightning.datasets import build_dataloader
 from centernet_lightning.utils import LogImageCallback, load_config
@@ -40,7 +45,6 @@ def train(config: Union[str, Dict]):
 
     trainer.fit(model, train_dataloader, val_dataloader)
     if isinstance(trainer_config["logger"], pl_loggers.WandbLogger):
-        import wandb
         wandb.finish()
 
 def parse_trainer_config(trainer_cfg, logger_mapper, callback_mapper):

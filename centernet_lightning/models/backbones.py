@@ -4,7 +4,11 @@ from copy import deepcopy
 from torch import nn
 from torch.nn.modules.batchnorm import _BatchNorm
 from torchvision.models import resnet, mobilenet
-import timm
+
+try:
+    import timm
+except ImportError:
+    pass
 
 from ..utils import load_config
 

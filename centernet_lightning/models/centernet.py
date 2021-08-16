@@ -14,6 +14,11 @@ from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 from tqdm import tqdm
 import cv2
 
+try:
+    import wandb
+except ImportError:
+    pass
+
 from .backbones import build_backbone
 from .necks import build_neck
 from .heads import build_output_heads, HeatmapHead, Box2DHead, ReIDHead
@@ -208,7 +213,6 @@ class CenterNet(pl.LightningModule):
             self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
         
         elif isinstance(self.logger, WandbLogger):
-            import wandb
             self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def register_optimizer(self, optimizer_cfg: Dict):
