@@ -11,7 +11,6 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-import wandb
 from tqdm import tqdm
 import cv2
 
@@ -209,6 +208,7 @@ class CenterNet(pl.LightningModule):
             self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
         
         elif isinstance(self.logger, WandbLogger):
+            import wandb
             self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def register_optimizer(self, optimizer_cfg: Dict):

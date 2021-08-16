@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from torch.utils.data import Subset
-import wandb
 
 from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset
 from .box import *
@@ -155,6 +154,7 @@ class LogImageCallback(pl.Callback):
         # make into a grid and log the image
         heatmap_grid = make_image_grid(heatmaps)
         if isinstance(trainer.logger, WandbLogger):
+            import wandb
             trainer.logger.experiment.log({"target heatmap": wandb.Image(heatmap_grid)})
         elif isinstance(trainer.logger, TensorBoardLogger):
             trainer.logger.experiment.add_image("target heatmap", heatmap_grid, dataformats="hwc")
@@ -232,6 +232,7 @@ class LogImageCallback(pl.Callback):
         log_images = {k: make_image_grid(v) for k,v in log_images.items()}
 
         if isinstance(trainer.logger, WandbLogger):
+            import wandb
             wandb_log = {
                 "detections": wandb.Image(img_grid, boxes={
                     "predictions": {"box_data": convert_bboxes_to_wandb(pred_bboxes, pred_labels, pred_scores)},

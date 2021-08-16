@@ -7,7 +7,6 @@ from functools import partial
 import pytorch_lightning as pl
 import pytorch_lightning.loggers as pl_loggers
 import pytorch_lightning.callbacks as pl_callbacks
-import wandb
 
 from centernet_lightning.models import build_centernet
 from centernet_lightning.datasets import build_dataloader
@@ -40,7 +39,9 @@ def train(config: Union[str, Dict]):
     trainer = pl.Trainer(**trainer_config)
 
     trainer.fit(model, train_dataloader, val_dataloader)
-    wandb.finish()
+    if isinstance(trainer_config["logger"], pl_loggers.WandbLogger):
+        import wandb
+        wandb.finish()
 
 def parse_trainer_config(trainer_cfg, logger_mapper, callback_mapper):
     config = deepcopy(trainer_cfg)
