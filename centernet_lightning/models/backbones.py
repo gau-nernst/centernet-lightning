@@ -9,10 +9,10 @@ import timm
 from ..utils import load_config
 
 _backbone_channels = {
-    "resnet18": [64, 128, 256, 512],
-    "resnet34": [64, 128, 256, 512],
-    "resnet50": [256, 512, 1024, 2048],
-    "resnet101": [256, 512, 1024, 2048],
+    "resnet18": [64, 64, 128, 256, 512],
+    "resnet34": [64, 64, 128, 256, 512],
+    "resnet50": [64, 256, 512, 1024, 2048],
+    "resnet101": [64, 256, 512, 1024, 2048],
 
     "mobilenet_v2": [16, 24, 32, 96, 320],
     "mobilenet_v3_small": [16, 16, 24, 48, 96],
