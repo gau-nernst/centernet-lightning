@@ -1,4 +1,5 @@
 from typing import Dict, Union
+import math
 
 import numpy as np
 import torch
@@ -9,25 +10,24 @@ from ..losses import CornerNetFocalLossWithLogits, QualityFocalLossWithLogits
 from ..losses import IoULoss, GIoULoss, DIoULoss, CIoULoss
 from ..utils import convert_cxcywh_to_x1y1x2y2, load_config
 
-class BaseHead(nn.Module):
+class BaseHead(nn.Sequential):
     # Reference implementations
     # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L125    use num_filters = 256
     # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py#L5      use num_filters = in_channels
     
-    def __init__(self, in_channels, out_channels, hidden_channels=256, init_bias=None):
+    def __init__(self, in_channels, out_channels, width=256, depth=1, init_bias=None):
         super().__init__()
-        conv1 = nn.Conv2d(in_channels, hidden_channels, 3, padding=1)
-        relu = nn.ReLU(inplace=True)
-        conv2 = nn.Conv2d(hidden_channels, out_channels, 1)
-        
-        nn.init.kaiming_normal_(conv1.weight, mode="fan_out", nonlinearity="relu")
-        if init_bias is not None:
-            conv2.bias.data.fill_(init_bias)
-        
-        self.head = nn.Sequential(conv1, relu, conv2)
+        for i in range(depth):
+            in_c = in_channels if i == 0 else width
+            conv = nn.Conv2d(in_c, width, 3, padding=1)
+            self.add_module(f"conv{i}", conv)
+            self.add_module(f"relu{i}", nn.ReLU(inplace=True))
+            
+            nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
 
-    def forward(self, x):
-        return self.head(x)
+        self.out_conv = nn.Conv2d(width, out_channels, 1)
+        if init_bias is not None:
+            self.out_conv.bias.data.fill_(init_bias)
     
     def compute_loss(self, pred, target, eps=1e-8):
         raise NotImplementedError()
@@ -38,8 +38,9 @@ class HeatmapHead(BaseHead):
         "quality_focal": QualityFocalLossWithLogits
     }
 
-    def __init__(self, in_channels, num_classes, hidden_channels=256, init_bias=-2.19, target_method="cornernet", loss_function="cornernet_focal", loss_weight=1):
-        super().__init__(in_channels, num_classes, hidden_channels=hidden_channels, init_bias=init_bias)
+    def __init__(self, in_channels, num_classes, width=256, depth=1, heatmap_prior=0.1, target_method="cornernet", loss_function="cornernet_focal", loss_weight=1):
+        init_bias = math.log(heatmap_prior/(1-heatmap_prior))
+        super().__init__(in_channels, num_classes, width=width, depth=depth, init_bias=init_bias)
         self.num_classes = num_classes
         self.target_method = target_method
         self.loss_function = self._loss_mapper[loss_function]()
@@ -175,8 +176,8 @@ class Box2DHead(BaseHead):
     }
     out_channels = 4
 
-    def __init__(self, in_channels, hidden_channels=256, init_bias=None, loss_function="l1", loss_weight=1):
-        super().__init__(in_channels, self.out_channels, hidden_channels=hidden_channels, init_bias=init_bias)
+    def __init__(self, in_channels, width=256, depth=1, init_bias=None, loss_function="l1", loss_weight=1):
+        super().__init__(in_channels, self.out_channels, width=width, depth=depth, init_bias=init_bias)
         self.loss_function = self._loss_mapper[loss_function](reduction="none")
         self.loss_weight = loss_weight
 
@@ -243,7 +244,7 @@ class Box2DHead(BaseHead):
         
         return topk_bboxes
 
-class ReIDHead(BaseHead):
+class EmbeddingHead(BaseHead):
     """FairMOT head. Paper: https://arxiv.org/abs/2004.01888
     """
     # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py#L3322
@@ -252,14 +253,19 @@ class ReIDHead(BaseHead):
         "ce": nn.CrossEntropyLoss
     }
 
-    def __init__(self, in_channels, max_track_ids=1000, reid_dim=64, hidden_channels=256, init_bias=None, loss_function="ce", loss_weight=1):
-        super().__init__(in_channels, reid_dim, hidden_channels=hidden_channels, init_bias=init_bias)
+    def __init__(self, in_channels, max_track_ids=1000, emb_dim=64, width=256, depth=1, init_bias=None, loss_function="ce", loss_weight=1):
+        super().__init__(in_channels, emb_dim, width=width, depth=depth, init_bias=init_bias)
         self.loss_function = self._loss_mapper[loss_function](reduction="none")
-        self.reid_dim = reid_dim
+        self.reid_dim = emb_dim
         self.loss_weight = loss_weight
         
         # used during training only
-        self.classifier = self._make_classification_head(max_track_ids)
+        self.classifier = nn.Sequential(
+            nn.Linear(self.reid_dim, self.reid_dim, bias=False),
+            nn.BatchNorm1d(self.reid_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.reid_dim, max_track_ids)
+        )
 
     def compute_loss(self, pred, target, eps=1e-8):
         reid_embeddings = pred["reid"]
@@ -302,15 +308,6 @@ class ReIDHead(BaseHead):
         embeddings = embeddings.swapaxes(1,2)
         return embeddings
 
-    def _make_classification_head(self, num_classes):
-        # 2-layer MLP
-        head = nn.Sequential(
-            nn.Linear(self.reid_dim, self.reid_dim, bias=False),
-            nn.BatchNorm1d(self.reid_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.reid_dim, num_classes)
-        )
-        return head
 
 def build_output_heads(config: Union[str, Dict], in_channels):
     if isinstance(config, str):
@@ -321,7 +318,7 @@ def build_output_heads(config: Union[str, Dict], in_channels):
     output_head_mapper = {
         "heatmap": HeatmapHead,
         "box_2d": Box2DHead,
-        "reid": ReIDHead
+        "reid": EmbeddingHead
     }
     for name, params in config.items():
         head = output_head_mapper[name](in_channels, **params)
