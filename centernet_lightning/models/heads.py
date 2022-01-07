@@ -58,7 +58,7 @@ class HeatmapHead(BaseHead):
         return loss
 
     @classmethod
-    def gather_topk(cls, heatmap: torch.Tensor, nms_kernel=3, num_detections=100):
+    def gather_topk(cls, heatmap: torch.Tensor, nms_kernel: int=3, num_detections: int=300):
         """Gather top k detections from heatmap
         """
         batch_size = heatmap.shape[0]
@@ -176,73 +176,72 @@ class Box2DHead(BaseHead):
     }
     out_channels = 4
 
-    def __init__(self, in_channels, width=256, depth=1, init_bias=None, loss_function="l1", loss_weight=1):
-        super().__init__(in_channels, self.out_channels, width=width, depth=depth, init_bias=init_bias)
+    def __init__(
+        self,
+        in_channels,
+        loss_function="l1",
+        loss_weight=1,
+        log_box=False,
+        box_multiplier=1,
+        **kwargs
+        ):
+        super().__init__(in_channels, self.out_channels, **kwargs)
         self.loss_function = self._loss_mapper[loss_function](reduction="none")
         self.loss_weight = loss_weight
+        self.log_box = log_box
+        self.box_multiplier = box_multiplier
 
     def compute_loss(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor], eps=1e-8):
-        pred_box_map = pred["box_2d"]   # NCHW
-        target_box = target["bboxes"]   # N x num_detections x 4, cxcywh format
-        mask = target["mask"]           # N x num_detections
+        box_offsets = pred["box_2d"]        # N x 4 x out_h x out_w
+        target_boxes = target["boxes"]      # N x num_detections x 4, cxcywh format
+        mask = target["mask"]               # N x num_detections
         
-        batch_size, channels, output_height, output_width = pred_box_map.shape
+        out_h, out_w = box_offsets.shape[-2:]
 
-        # 1. scale up to feature map size and convert to integer
-        target_box = target_box.clone()
-        target_box[...,[0,2]] *= output_width
-        target_box[...,[1,3]] *= output_height
+        # 1. scale target boxes to feature map size
+        target_boxes = target_boxes.clone()
+        target_boxes[...,[0,2]] *= out_w
+        target_boxes[...,[1,3]] *= out_h
 
-        x_indices = target_box[...,0].long()
-        y_indices = target_box[...,1].long()
-        xy_indices = y_indices * output_width + x_indices
-        xy_indices = xy_indices.unsqueeze(1).expand((batch_size, channels, -1))
-
-        # 2. gather outputs: left, top, right, bottom
-        pred_box_map = torch.clamp_min(pred_box_map, 0)
-        pred_box_map = pred_box_map.view(batch_size, channels, -1)          # flatten
-        pred_box = torch.gather(pred_box_map, dim=-1, index=xy_indices)
-
-        # 3. quantized xy (floor) and align to center of the cell (+0.5)
-        aligned_x = torch.floor(target_box[...,0]) + 0.5
-        aligned_y = torch.floor(target_box[...,1]) + 0.5
-        pred_box[:,0,:] = aligned_x - pred_box[:,0,:]   # x1 = x - left
-        pred_box[:,1,:] = aligned_y - pred_box[:,1,:]   # y1 = y - top
-        pred_box[:,2,:] = aligned_x + pred_box[:,2,:]   # x2 = x + right
-        pred_box[:,3,:] = aligned_y + pred_box[:,3,:]   # y2 = y + bottom
-
-        # 4. cxcywh to x1y1x2y2 and apply loss
-        target_box = convert_cxcywh_to_x1y1x2y2(target_box, inplace=False)
-        pred_box = pred_box.swapaxes(1,2)
-        loss = self.loss_function(pred_box, target_box) * mask.unsqueeze(-1)
+        # 2. get training samples. only center
+        # TODO: 3x3 square
+        indices = target_boxes[...,1].round() * out_w + target_boxes[...,0].round()
+        pred_boxes = self.gather_and_decode(box_offsets, indices)
+        
+        # 3. convert to xyxy and apply loss
+        target_boxes = convert_cxcywh_to_x1y1x2y2(target_boxes)
+        pred_box = pred_boxes.swapaxes(1,2)
+        loss = self.loss_function(pred_box, target_boxes) * mask.unsqueeze(-1)
         loss = loss.sum() / (mask.sum() + eps)
         return loss
 
-    @classmethod
-    def gather_at_indices(cls, box_2d: torch.Tensor, indices, normalize_bbox=False, stride=4):
+    def gather_and_decode(self, box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False):
         """Gather 2D bounding boxes at given indices
         """
-        batch_size, _, output_height, output_width = box_2d.shape
+        batch_size, _, out_h, out_w = box_offsets.shape
 
-        cx = indices % output_width + 0.5
-        cy = indices // output_width + 0.5
+        cx = indices % out_w + 0.5
+        cy = indices // out_w + 0.5
 
-        box_2d = box_2d.view(batch_size, 4, -1)
-        x1 = cx - torch.gather(box_2d[:,0], dim=-1, index=indices)    # x1 = cx - left
-        y1 = cy - torch.gather(box_2d[:,1], dim=-1, index=indices)    # y1 = cy - top
-        x2 = cx + torch.gather(box_2d[:,2], dim=-1, index=indices)    # x2 = cx + right
-        y2 = cy + torch.gather(box_2d[:,3], dim=-1, index=indices)    # y2 = cy + bottom
+        box_offsets = box_offsets.view(batch_size, 4, -1)
+        boxes = torch.zeros((batch_size, len(indices), 4))
 
-        topk_bboxes = torch.stack([x1, y1, x2, y2], dim=-1)
-        if normalize_bbox:
-            # normalize to [0,1]
-            topk_bboxes[...,[0,2]] /= output_width
-            topk_bboxes[...,[1,3]] /= output_height    
-        else:
-            # convert to input image coordinates
-            topk_bboxes *= stride
+        if self.log_box:
+            box_offsets = torch.exp(box_offsets)
+        if self.box_multiplier > 1:
+            box_offsets *= self.box_multiplier
+        box_offsets = box_offsets.clamp_min(0)
+
+        boxes[...,0] = cx - torch.gather(box_offsets[:,0], dim=-1, index=indices)   # x1 = cx - left
+        boxes[...,1] = cy - torch.gather(box_offsets[:,1], dim=-1, index=indices)   # y1 = cy - top
+        boxes[...,2] = cx + torch.gather(box_offsets[:,2], dim=-1, index=indices)   # x2 = cx + right
+        boxes[...,3] = cy + torch.gather(box_offsets[:,3], dim=-1, index=indices)   # y2 = cy + bottom
+
+        if normalize_boxes:      # convert to normalized coordinates
+            boxes[...,[0,2]] /= out_w
+            boxes[...,[1,3]] /= out_h
         
-        return topk_bboxes
+        return boxes
 
 class EmbeddingHead(BaseHead):
     """FairMOT head. Paper: https://arxiv.org/abs/2004.01888

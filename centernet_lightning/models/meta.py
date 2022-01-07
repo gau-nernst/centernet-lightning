@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Callable, Dict
 from functools import partial
 
 import torch
@@ -7,10 +7,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
 
+from centernet_lightning.models.heads import BaseHead
+
 try:
     import wandb
 except ImportError:
-    pass
+    wandb = None
 
 
 _optimizers = {
@@ -21,14 +23,17 @@ _optimizers = {
 }
 
 
-class CenterNetBase(pl.LightningModule):
-    """General CenterNet model
+class MetaCenterNet(pl.LightningModule):
+    """Meta architecture for CenterNet
     """
     def __init__(
         self,
         backbone: nn.Module,
         neck: nn.Module,
-        heads: List[Dict],
+        heads: Dict[str, Callable[..., BaseHead]],
+
+        head_width: int=256,
+        head_depth: int=1,
 
         # optimizer and scheduler
         optimizer: str="SGD",
@@ -48,13 +53,11 @@ class CenterNetBase(pl.LightningModule):
         self.save_hyperparameters()
         self.backbone = backbone 
         self.neck = neck
-        self.heads = nn.ModuleDict()
-        for name, module in heads:
-            self.heads[name] = module
+        self.heads = nn.ModuleDict({k: v(neck.out_channels, width=head_width, depth=head_depth) for k, v in heads.items()})
+        
+        # self.output_stride = self.backbone.output_stride // self.neck.upsample_stride
 
-        self.output_stride = self.backbone.output_stride // self.neck.upsample_stride
-
-    def get_encoded_outputs(self, x, include_feat_map=True):
+    def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
         feat = self.backbone(x)
@@ -65,7 +68,7 @@ class CenterNetBase(pl.LightningModule):
         
         return outputs
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float = 1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float=1e-8):
         """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
         losses = {"total": torch.tensor(0., device=self.device)}
@@ -86,19 +89,6 @@ class CenterNetBase(pl.LightningModule):
                 self.log_histogram(f"output_values/{k}", v)
 
         return losses["total"]
-
-    def validation_epoch_end(self, outputs):
-        preds = {key: [] for key in outputs[0][0]}
-        target = {key: [] for key in outputs[0][1]}
-
-        # concatenate lists
-        for (pred_detections, target_detections) in outputs:
-            for key in preds:
-                preds[key].extend(pred_detections[key])
-            for key in target:
-                target[key].extend(target_detections[key])
-        
-        return preds, target
 
     def log_histogram(self, name: str, values: torch.Tensor, freq=500):
         """Log histogram. Only TensorBoard and Wandb are supported
@@ -151,15 +141,3 @@ class CenterNetBase(pl.LightningModule):
             "optimizer": optimizer, 
             "lr_scheduler": lr_scheduler
         }
-
-
-def build_centernet(config):
-    if isinstance(config, str):
-        config = load_config(config)
-        config = config["model"]
-    
-    if "load_from_checkpoint" in config:
-        model = CenterNetBase.load_from_checkpoint(config["load_from_checkpoint"], strict=False, **config)
-    else:
-        model = CenterNetBase(**config)
-    return model

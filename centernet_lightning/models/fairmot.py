@@ -1,12 +1,12 @@
 import torch
 
-from .base import CenterNetBase
+from .meta import MetaCenterNet
 from .tracker import Tracker
 from ..utils import convert_cxcywh_to_xywh, convert_x1y1x2y2_to_xywh
 from ..eval import evaluate_mot_tracking_sequence
 
 
-class FairMOT(CenterNetBase):
+class FairMOT(MetaCenterNet):
     # rank 1 only?
     def on_validation_epoch_start(self):
         self.tracker = Tracker(device=self.device)
