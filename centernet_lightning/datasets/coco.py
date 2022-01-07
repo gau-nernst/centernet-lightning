@@ -5,6 +5,7 @@ import pickle
 
 import cv2
 from torch.utils.data import Dataset
+from torchvision import datasets
 import albumentations as A
 from pycocotools.coco import COCO
 
@@ -91,6 +92,42 @@ def get_coco_detection_annotations(ann_dir: str, split: str, force_redo: bool = 
 
     del coco
     return ann
+
+
+class CocoDetection(datasets.CocoDetection):
+    def __init__(self, img_dir, ann_json, transforms=None):
+        if transforms is not None:
+            box_params = transforms.processors["bboxes"].params
+            assert box_params.format == "coco"
+            assert "labels" in box_params.label_fields
+        
+        super().__init__(img_dir, ann_json)
+        self._transforms = transforms
+
+        ann_keys = ("bbox", "category_id")
+        self.coco.anns = {ann_id: {k: ann[k] for k in ann_keys} for ann_id, ann in self.coco.anns.items()}
+    
+    def _load_target(self, idx):
+        target = super()._load_target(idx)
+        return {
+            "boxes": [x["bbox"] for x in target],
+            "labels": [x["category_id"] for x in target]
+        }
+
+    def __getitem__(self, idx):
+        img, target = super().__getitem__(idx)
+        img_w, img_h = img.size
+        target["image_width"] = img_w
+        target["image_height"] = img_h
+
+        if self._transforms is not None:
+            augmented = self._transforms(image=img, bboxes=target["boxes"], labels=target["labels"])
+            img = augmented["image"]
+            target["boxes"] = augmented["bboxes"]
+            target["labels"] = augmented["labels"]
+
+        return img, target
+
 
 class COCODataset(Dataset):
     """Dataset class for dataset in COCO format. Only detection is supported. Bounding box in YOLO format (cxcywh and normalized to [0,1])

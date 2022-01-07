@@ -15,7 +15,7 @@ except:
     pass
 
 from ..datasets import IMAGENET_MEAN, IMAGENET_STD, build_dataset
-from .box import *
+from .box import convert_box_format
 
 RED = (1., 0., 0.)
 BLUE = (0., 0., 1.)
@@ -200,7 +200,7 @@ class LogImageCallback(pl.Callback):
             
             detections_target["bboxes"][-1][...,[0,2]] *= img_width
             detections_target["bboxes"][-1][...,[1,3]] *= img_height
-            convert_cxcywh_to_x1y1x2y2(detections_target["bboxes"][-1], inplace=True)
+            detections_target["bboxes"][-1] = convert_box_format(detections_target["bboxes"][-1], "cxcywh", "xyxxy")
 
             img = img.unsqueeze(0).to(pl_module.device)
             encoded_outputs = pl_module.get_encoded_outputs(img)

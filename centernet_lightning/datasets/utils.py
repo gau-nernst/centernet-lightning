@@ -1,4 +1,4 @@
-from typing import Iterable
+from typing import Iterable, Dict, List
 
 import numpy as np
 
@@ -31,6 +31,12 @@ def get_default_tracking_transforms(box_format="yolo"):
     """
     transforms = get_default_transforms(resize_height=608, resize_width=1088, box_format=box_format, label_fields=["labels", "ids"])
     return transforms
+
+
+def collate_fn(batch: List[Dict]):
+    images = torch.stack([x[0] for x in batch], dim=0)
+    targets = [x[1] for x in batch]
+    return images, targets
 
 class CollateDetection:
 

@@ -1,85 +1,50 @@
-from typing import Union
-
 import numpy as np
 import torch
 
-def convert_xywh_to_cxcywh(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from xywh format to cxcywh format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
+
+def convert_box_format(boxes, old_format, new_format):
+    box_formats = ("xyxy", "xywh", "cxcywh")
+    assert old_format in box_formats
+    assert new_format in box_formats
+
+    if isinstance(boxes, (torch.Tensor, np.ndarray)):
+        boxes = boxes.clone() if isinstance(boxes, torch.Tensor) else boxes.copy()
+        
+        # convert to xywh
+        if old_format == "xyxy":
+            boxes[...,2] -= boxes[...,0]        # w = x2 - x1
+            boxes[...,3] -= boxes[...,1]        # h = y2 - y1
+        elif old_format == "cxcywh":
+            boxes[...,0] -= boxes[...,2] / 2    # x = cx - w/2
+            boxes[...,1] -= boxes[...,3] / 2    # y = cy - h/2
+
+        if new_format == "xyxy":
+            boxes[...,2] += boxes[...,0]        # x2 = x1 + w
+            boxes[...,3] += boxes[...,1]        # y2 = x1 + h
+        elif new_format == "cxcywh":
+            boxes[...,0] += boxes[...,2] / 2    # cx = x + w/2
+            boxes[...,1] += boxes[...,3] / 2    # cy = y + h/2
+
+    else:
+        if isinstance(boxes[0], int):
+            # convert to xywh
+            if old_format == "xyxy":
+                x, y, x2, y2 = boxes
+                w, h = x2 - x, y2 - y
+            elif old_format == "cxcywh":
+                cx, cy, w, h = boxes
+                x, y = cx - w/2, cy - h/2
+            
+            if new_format == "xyxy":
+                boxes = (x, y, x+w, y+h)
+            elif new_format == "cxcywh":
+                boxes = (x+w/2, y+h/2, w, h)
+
         else:
-            bboxes = bboxes.copy()
+            boxes = (convert_box_format(x, old_format, new_format) for x in boxes)
 
-    bboxes[...,0] += bboxes[...,2] / 2      # cx = x + w/2
-    bboxes[...,1] += bboxes[...,3] / 2      # cy = y + h/2
-    return bboxes
+    return boxes
 
-def convert_cxcywh_to_xywh(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from cxcywh format to xywh format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
-        else:
-            bboxes = bboxes.copy()
-    
-    bboxes[...,0] -= bboxes[...,2] / 2      # x = cx - w/2
-    bboxes[...,1] -= bboxes[...,3] / 2      # y = cy - h/2
-    return bboxes
-
-def convert_xywh_to_x1y1x2y2(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from xywh format to x1y2x2y2 format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
-        else:
-            bboxes = bboxes.copy()
-    
-    bboxes[...,2] += bboxes[...,0]          # x2 = x1 + w
-    bboxes[...,3] += bboxes[...,1]          # y2 = x1 + h
-    return bboxes
-
-def convert_x1y1x2y2_to_xywh(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from x1y2x2y2 format to xywh format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
-        else:
-            bboxes = bboxes.copy()
-
-    bboxes[...,2] -= bboxes[...,0]          # w = x2 - x1
-    bboxes[...,3] -= bboxes[...,1]          # h = y2 - y1
-    return bboxes
-
-def convert_cxcywh_to_x1y1x2y2(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from cxcywh format to x1y2x2y2 format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
-        else:
-            bboxes = bboxes.copy()
-    
-    convert_cxcywh_to_xywh(bboxes, inplace=True)
-    convert_xywh_to_x1y1x2y2(bboxes, inplace=True)
-    return bboxes
-
-def convert_x1y1x2y2_to_cxcywh(bboxes: Union[np.ndarray, torch.Tensor], inplace=False):
-    """Convert bboxes from x1y2x2y2 format to cxcywh format
-    """
-    if not inplace:
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone()
-        else:
-            bboxes = bboxes.copy()
-    
-    convert_x1y1x2y2_to_xywh(bboxes, inplace=True)
-    convert_xywh_to_cxcywh(bboxes, inplace=True)
-    return bboxes
 
 def box_inter_union_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
     area1 = (boxes1[...,2] - boxes1[...,0]) * (boxes1[...,3] - boxes1[...,1])
@@ -95,10 +60,12 @@ def box_inter_union_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
 
     return inter, union
 
+
 def box_iou_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
     inter, union = box_inter_union_matrix(boxes1, boxes2)
     iou = inter / union
     return iou
+
 
 def box_giou_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
     inter, union = box_inter_union_matrix(boxes1, boxes2)
@@ -112,10 +79,12 @@ def box_giou_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
 
     return iou - (areai - union) / areai
 
+
 def box_iou_distance_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
     """1 - IoU
     """
     return 1 - box_iou_matrix(boxes1, boxes2)
+
 
 def box_giou_distance_matrix(boxes1: np.ndarray, boxes2: np.ndarray):
     """1 - GIoU

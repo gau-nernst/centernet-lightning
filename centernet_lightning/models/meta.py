@@ -6,9 +6,6 @@ from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-
-from centernet_lightning.models.heads import BaseHead
-
 try:
     import wandb
 except ImportError:
@@ -21,6 +18,32 @@ _optimizers = {
     "AdamW": torch.optim.AdamW,
     "RMSprop": partial(torch.optim.RMSprop, momentum=0.9)
 }
+
+
+class BaseHead(nn.Module):
+    # Reference implementations
+    # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py     num_filters = 256
+    # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py                                     num_filters = in_channels
+    def __init__(self, in_channels, out_channels, width=256, depth=1, init_bias=None):
+        super().__init__()
+        layers = []
+        for i in range(depth):
+            in_c = in_channels if i == 0 else width
+            layers.append(nn.Conv2d(in_c, width, 3, padding=1))
+            layers.append(nn.ReLU(inplace=True))            
+            nn.init.kaiming_normal_(layers[-2].weight, mode="fan_out", nonlinearity="relu")
+        
+        layers.append(nn.Conv2d(width, out_channels, 1))
+        if init_bias is not None:
+            layers[-1].bias.data.fill_(init_bias)
+        
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layers(x)
+
+    def compute_loss(self, pred, target, eps=1e-8):
+        pass
 
 
 class MetaCenterNet(pl.LightningModule):
@@ -53,9 +76,9 @@ class MetaCenterNet(pl.LightningModule):
         self.save_hyperparameters()
         self.backbone = backbone 
         self.neck = neck
-        self.heads = nn.ModuleDict({k: v(neck.out_channels, width=head_width, depth=head_depth) for k, v in heads.items()})
-        
-        # self.output_stride = self.backbone.output_stride // self.neck.upsample_stride
+
+        self.stride = self.backbone.stride // self.neck.stride
+        self.heads = nn.ModuleDict({k: v(neck.out_channels, stride=self.stride, width=head_width, depth=head_depth) for k, v in heads.items()})
 
     def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
@@ -79,8 +102,9 @@ class MetaCenterNet(pl.LightningModule):
         return losses
 
     def training_step(self, batch, batch_idx):
-        encoded_outputs = self.get_encoded_outputs(batch["image"])
-        losses = self.compute_loss(encoded_outputs, batch)
+        images, targets = batch
+        encoded_outputs = self.get_encoded_outputs(images)
+        losses = self.compute_loss(encoded_outputs, targets)
         for k, v in losses.items():
             self.log(f"train/{k}_loss", v)
 
