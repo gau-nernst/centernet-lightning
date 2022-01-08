@@ -26,8 +26,9 @@ class BaseHead(nn.Module):
     # Reference implementations
     # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py     num_filters = 256
     # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py                                     num_filters = in_channels
-    def __init__(self, in_channels, out_channels, width=256, depth=1, init_bias=None):
+    def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=1, init_bias: float=None, loss_weight: float=1.):
         super().__init__()
+        self.loss_weight = loss_weight
         layers = []
         for i in range(depth):
             in_c = in_channels if i == 0 else width
@@ -71,6 +72,7 @@ class MetaCenterNet(pl.LightningModule):
         # logging
         log_feat_map: bool=False,
         log_values_hist: bool=False,
+        log_freq: int=500
         ):
         super().__init__()
         self.save_hyperparameters()
@@ -80,7 +82,7 @@ class MetaCenterNet(pl.LightningModule):
         self.stride = self.backbone.stride // self.neck.stride
         self.heads = nn.ModuleDict({k: v(neck.out_channels, stride=self.stride, width=head_width, depth=head_depth) for k, v in heads.items()})
 
-    def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True):
+    def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True) -> Dict[str, torch.Tensor]:
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
         feat = self.backbone.forward_features(x)
@@ -91,12 +93,13 @@ class MetaCenterNet(pl.LightningModule):
         
         return outputs
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]], eps: float=1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]):
         """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
         losses = {"total": torch.tensor(0., device=self.device)}
         for name, module in self.heads.items():
-            losses[name] = module.compute_loss(preds, targets, eps=eps)
+            module: BaseHead
+            losses[name] = module.compute_loss(preds, targets)
             losses["total"] += losses[name] * module.loss_weight
 
         return losses
@@ -114,22 +117,19 @@ class MetaCenterNet(pl.LightningModule):
 
         return losses["total"]
 
-    def log_histogram(self, name: str, values: torch.Tensor, freq=500):
+    def log_histogram(self, name: str, values: torch.Tensor):
         """Log histogram. Only TensorBoard and Wandb are supported
         """
-        if self.trainer.global_step % freq != 0:
-            return
+        if self.trainer.global_step == 0 or (self.trainer.global_step + 1) % self.hparams.log_freq == 0:
+            flatten_values = values.detach().view(-1).cpu().float().numpy()
 
-        flatten_values = values.detach().view(-1).cpu().float().numpy()
-
-        if isinstance(self.logger, TensorBoardLogger):
-            self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
-        
-        elif isinstance(self.logger, WandbLogger):
-            self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
+            if isinstance(self.logger, TensorBoardLogger):
+                self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
+            elif isinstance(self.logger, WandbLogger):
+                self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def configure_optimizers(self):
-        if self.hparams.norm_weight_decay is not None:
+        if self.hparams.norm_weight_decay is not None:      # norm's weight decay = 0
             # https://github.com/pytorch/vision/blob/main/torchvision/ops/_utils.py
             norm_classes = (nn.modules.batchnorm._BatchNorm, nn.LayerNorm, nn.GroupNorm)
             
