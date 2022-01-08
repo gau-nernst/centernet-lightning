@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Union
 from functools import partial
 import math
 
@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torchmetrics.detection.map import MAP
 
 from .meta import BaseHead, MetaCenterNet
-from ..losses import focal_loss, iou_loss
+from ..losses import heatmap_losses, box_losses
 from ..utils import convert_box_format
 
 
@@ -21,46 +21,36 @@ class HeatmapRenderer:
     def get_radius(self, width, height):
         pass
 
-    def __call__(self, heatmap_shape, boxes: Tuple[torch.Tensor], labels: Tuple[torch.Tensor], eps=1e-8):
+    # TODO: make this torchscript-able
+    def __call__(self, heatmap: torch.Tensor, boxes: Tuple[Tuple[int]], labels: Tuple[int], eps=1e-8):
         """Render target heatmap for a batch of images
-
-        Args
-            heatmap_shape: shape of heatmap
-            bboxes: boxes in cxcwh format
-            labels: labels of the boxes
         """
-        out_h, out_w = heatmap_shape[-2:]
-        heatmap = torch.zeros(heatmap_shape, device=boxes[0].device)
+        out_h, out_w = heatmap.shape[-2:]
+        for box, label in zip(boxes, labels):
+            # scale up to heatmap dimensions
+            x, y, w, h = [i / self.stride for i in box]
+            cx = round(x + w/2)
+            cy = round(y + h/2)
+            
+            radius_w, radius_h = self.radius_fn(w, h)
+            std_x, std_y = round(radius_w / 3), round(radius_h / 3)
+            
+            l = min(cx, radius_w)
+            t = min(cy, radius_h)
+            r = min(out_w - cx, radius_w+1)
+            b = min(out_h - cy, radius_h+1)
 
-        # doing iteration on cpu is faster
-        boxes = [x.cpu().numpy() for x in boxes]
-        labels = [x.cpu().numpy() for x in labels]
+            # only gaussian and heatmap are on gpu
+            grid_y = torch.arange(-radius_h, radius_h+1, device=heatmap.device).view(-1,1)
+            grid_x = torch.arange(-radius_w, radius_w+1, device=heatmap.device).view(1,-1)
 
-        for i, img_boxes, img_labels in enumerate(zip(boxes, labels)):
-            for (cx, cy, w, h), label in zip(img_boxes, img_labels):
-                # scale up to heatmap dimensions
-                cx, cy = round(cx * out_w), round(cy * out_h)
-                w, h = w * out_w, h * out_h
+            gaussian = grid_x.square() / (2*std_x*std_x + eps) + grid_y.square() / (2*std_y*std_y + eps)
+            gaussian = torch.exp(-gaussian)
+            gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
 
-                radius_w, radius_h = self.radius_fn(w, h)
-                std_x, std_y = round(radius_w / 3), round(radius_h / 3)
-                
-                l = min(cx, radius_w)
-                t = min(cy, radius_h)
-                r = min(out_w - cx, radius_w+1)
-                b = min(out_h - cy, radius_h+1)
-
-                # only gaussian and heatmap are on gpu
-                grid_y = torch.arange(-radius_h, radius_h+1, device=heatmap.device).view(-1,1)
-                grid_x = torch.arange(-radius_w, radius_w+1, device=heatmap.device).view(1,-1)
-
-                gaussian = grid_x.square() / (2*std_x*std_x+eps) + grid_y.square() / (2*std_y*std_y + eps)
-                gaussian = torch.exp(-gaussian)
-                gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
-
-                masked_heatmap = heatmap[i, label, cy-t:cy+b, cx-l:cx+r]
-                masked_gaussian = gaussian[radius_h-t:radius_h+b, radius_w-l:radius_w+r]
-                torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
+            masked_heatmap = heatmap[label, cy-t:cy+b, cx-l:cx+r]
+            masked_gaussian = gaussian[radius_h-t:radius_h+b, radius_w-l:radius_w+r]
+            torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
     
         return heatmap
 
@@ -98,16 +88,12 @@ class TTFNetRenderer(HeatmapRenderer):
         return width/2 * self.alpha, height/2 * self.alpha
 
 
-class HeatmapHead(BaseHead):
-    _loss_mapper = {
-        "cornernet_focal": focal_loss.CornerNetFocalLossWithLogits,
-        "quality_focal": focal_loss.QualityFocalLossWithLogits
-    }
-    _renderers = {
-        "cornernet": CornerNetRenderer,
-        "ttfnet": TTFNetRenderer
-    }
+_heatmap_renderers = {
+    "cornernet": CornerNetRenderer,
+    "ttfnet": TTFNetRenderer
+}
 
+class HeatmapHead(BaseHead):
     def __init__(
         self,
         in_channels: int,
@@ -118,35 +104,38 @@ class HeatmapHead(BaseHead):
         heatmap_method: str="cornernet",
         min_overlap: float=0.3,         # for cornetnet
         alpha: float=0.54,              # for ttfnet
-        loss_function: str="cornernet_focal",
+        loss_function: str="CornerNetFocalLoss",
         loss_weight: float=1.,
         nms_kernel: int=3,
         num_detections: int=300,
-        **kwargs                        # width, depth
+        **base_head_kwargs
         ):
         init_bias = math.log(heatmap_prior/(1-heatmap_prior))
-        super().__init__(in_channels, num_classes, init_bias=init_bias, **kwargs)
+        super().__init__(in_channels, num_classes, init_bias=init_bias, **base_head_kwargs)
         
-        self.renderer = self._renderers[heatmap_method](stride=stride, min_overlap=min_overlap, alpha=alpha)
-        self.loss_function = self._loss_mapper[loss_function]()
+        self.renderer = _heatmap_renderers[heatmap_method](stride=stride, min_overlap=min_overlap, alpha=alpha)
+        self.loss_function = heatmap_losses.__all__[loss_function]()
         self.loss_weight = loss_weight
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, Tuple[torch.Tensor]], eps=1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]], eps=1e-8):
         heatmap = preds["heatmap"]
-        bboxes = targets["bboxes"]
-        labels = targets["labels"]
-        num_dets = sum([len(x) for x in labels])
 
-        target_heatmap = self.renderer(heatmap.shape, bboxes, labels)
+        target_heatmap = torch.zeros_like(heatmap)
+        num_dets = 0
+        for i, instances in enumerate(targets):
+            self.renderer(heatmap[i,...], instances["boxes"], instances["labels"])
+            num_dets += len(instances["labels"])
+
         loss = self.loss_function(heatmap, target_heatmap) / (num_dets + eps)
-
         return loss
 
     def gather_topk(self, heatmap: torch.Tensor):
         """Gather top k detections from heatmap
         """
+        if len(heatmap.shape) == 3:     # add batch dim if needed
+            heatmap = heatmap.unsqueeze(0)
         batch_size = heatmap.shape[0]
 
         # 1. pseudo-nms via max pool
@@ -167,54 +156,34 @@ class HeatmapHead(BaseHead):
 
 
 class Box2DHead(BaseHead):
-    _loss_mapper = {
-        "l1": nn.L1Loss,
-        "smooth_l1": nn.SmoothL1Loss,
-        "iou": iou_loss.IoULoss,
-        "giou": iou_loss.GIoULoss,
-        "diou": iou_loss.DIoULoss,
-        "ciou": iou_loss.CIoULoss
-    }
-    out_channels = 4
-
-    def __init__(
-        self,
-        in_channels: int,
-        stride: int=4,
-        loss_function: str="l1",
-        loss_weight: float=1.,
-        log_box: bool=False,
-        box_multiplier: float=1.,
-        **kwargs
-        ):
-        super().__init__(in_channels, self.out_channels, **kwargs)
+    def __init__(self, in_channels: int, stride: int=4, loss_function: str="l1", loss_weight: float=1., log_box: bool=False, box_multiplier: float=1., **base_head_kwargs):
+        out_channels = 4
+        super().__init__(in_channels, out_channels, **base_head_kwargs)
         self.stride = stride
-        self.loss_function = self._loss_mapper[loss_function](reduction="none")
+        self.loss_function = box_losses.__all__[loss_function](reduction="none")
         self.loss_weight = loss_weight
         self.log_box = log_box
         self.box_multiplier = box_multiplier
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, Tuple[torch.Tensor]], eps=1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Tuple[Dict[str, Union[Tuple, int]]], eps=1e-8):
         box_offsets = preds["box_2d"]       # N x 4 x out_h, out_w
-        target_boxes = targets["boxes"]     # N x num_dets x 4, xywh
-        
-        out_h, out_w = box_offsets.shape[-2:]
+        out_w = box_offsets.shape[-1]
 
         loss = torch.tensor(0., dtype=box_offsets.dtype, device=box_offsets.dtype)
         num_dets = 0
 
-        for i, img_boxes in enumerate(target_boxes):
-            # 1. scale target boxes to feature map size
-            img_boxes = img_boxes.clone() / self.stride
+        for i, instances in enumerate(targets):
+            img_boxes = convert_box_format(torch.tensor(instances["boxes"]), "xywh", "xyxy")    # for regression
+            cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride                        # for gathering training samples
+            cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride                        # num_dets x 4
 
             # 2. get training samples. only center
             # TODO: 3x3 square
-            indices = img_boxes[...,1].round() * out_w + img_boxes[...,0].round()
+            indices = cy.round() * out_w + cx.round()
             pred_boxes = self.gather_and_decode(box_offsets[i], indices)
-            pred_boxes = pred_boxes.swapaxes(1,2)
+            pred_boxes = pred_boxes.swapaxes(-1,-2)
 
             # 3. convert to xyxy and apply loss
-            img_boxes = convert_box_format(img_boxes, "xywh", "xyxy")
             loss += self.loss_function(pred_boxes, img_boxes)
             num_dets += len(img_boxes)
 
@@ -229,6 +198,7 @@ class Box2DHead(BaseHead):
         cx = indices % out_w + 0.5
         cy = indices // out_w + 0.5
 
+        # decoded = multiplier x exp(encoded)
         box_offsets = box_offsets.flatten(start_dim=-2, end_dim=-1)
         if self.log_box:
             box_offsets = torch.exp(box_offsets)
@@ -271,8 +241,7 @@ class CenterNet(MetaCenterNet):
         ):
         heads = {
             "heatmap": partial(
-                HeatmapHead, 
-                num_classes=num_classes, heatmap_prior=heatmap_prior,
+                HeatmapHead, num_classes=num_classes, heatmap_prior=heatmap_prior,
                 target_method=heatmap_method, loss_function=heatmap_loss
             ),
             "box_2d": partial(Box2DHead, loss_function=box_loss, log_box=log_box, box_multiplier=box_multiplier)
@@ -287,13 +256,15 @@ class CenterNet(MetaCenterNet):
         for k, v in losses.items():
             self.log(f"val/{k}_loss", v)
         
-        # target box format?
-        # convert dict to list
         preds = self.gather_detections(outputs["heatmap"].sigmoid(), outputs["box_2d"])
-        preds = [{k: v[i]} for i, (k, v) in enumerate(preds.items())]    
-        target = [{k: targets[k][i] for k in ("boxes", "labels")} for i in range(len(targets["boxes"]))]
+        preds = [{k: v[i]} for i, (k, v) in enumerate(preds.items())]               # convert dict to list
         
-        self.metric.update(preds, target)
+        target_keys = ("boxes", "labels")
+        targets = [{k: torch.tensor(x[k]) for k in target_keys} for x in targets]   # extract required keys
+        targets["boxes"] = convert_box_format(targets["boxes"], "xywh", "xyxy")
+
+        # TODO: scale to original image size to get correct AP small, medium, large?
+        self.metric.update(preds, targets)
     
     def gather_detections(
         self,

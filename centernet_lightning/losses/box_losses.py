@@ -2,6 +2,12 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import L1Loss, SmoothL1Loss
+
+
+__all__ = [
+    "L1Loss", "SmoothL1Loss", "IoULoss", "GIoULoss", "DIoULoss", "CIoULoss"
+]
 
 def _get_iou(boxes1: torch.Tensor, boxes2: torch.Tensor):
     area1 = (boxes1[...,2] - boxes1[...,0]) * (boxes1[...,3] - boxes1[...,1])

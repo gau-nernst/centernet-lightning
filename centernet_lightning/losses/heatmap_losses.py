@@ -2,7 +2,13 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-class CornerNetFocalLossWithLogits(nn.Module):
+
+__all__ = [
+    "CornerNetFocalLoss", "QualityFocalLoss"
+]
+
+
+class CornerNetFocalLoss(nn.Module):
     """CornerNet Focal Loss. Use logits to improve numerical stability. CornerNet: https://arxiv.org/abs/1808.01244
     """
     # reference implementations
@@ -42,7 +48,7 @@ class CornerNetFocalLossWithLogits(nn.Module):
 
         return loss
 
-class QualityFocalLossWithLogits(nn.Module):
+class QualityFocalLoss(nn.Module):
     """Quality Focal Loss. Use logits to improve numerical stability. Generalized Focal Loss: https://arxiv.org/abs/2006.04388
     """
     def __init__(self, beta: float = 2, reduction: str = "sum"):

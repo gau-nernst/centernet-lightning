@@ -1,4 +1,4 @@
-from typing import Callable, Dict
+from typing import Callable, Dict, List, Union
 from functools import partial
 
 import torch
@@ -10,6 +10,8 @@ try:
     import wandb
 except ImportError:
     wandb = None
+
+from vision_toolbox.backbones.base import BaseBackbone
 
 
 _optimizers = {
@@ -51,7 +53,7 @@ class MetaCenterNet(pl.LightningModule):
     """
     def __init__(
         self,
-        backbone: nn.Module,
+        backbone: BaseBackbone,
         neck: nn.Module,
         heads: Dict[str, Callable[..., BaseHead]],
 
@@ -70,8 +72,6 @@ class MetaCenterNet(pl.LightningModule):
         log_feat_map: bool=False,
         log_values_hist: bool=False,
         ):
-        """Build CenterNet from backbone, neck, and output heads configurations
-        """
         super().__init__()
         self.save_hyperparameters()
         self.backbone = backbone 
@@ -83,7 +83,7 @@ class MetaCenterNet(pl.LightningModule):
     def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True):
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
-        feat = self.backbone(x)
+        feat = self.backbone.forward_features(x)
         feat = self.neck(feat)
         outputs = {name: module(feat) for name, module in self.heads.items()}
         if self.hparams.log_feat_map and include_feat_map:
@@ -91,7 +91,7 @@ class MetaCenterNet(pl.LightningModule):
         
         return outputs
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor], eps: float=1e-8):
+    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]], eps: float=1e-8):
         """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
         """
         losses = {"total": torch.tensor(0., device=self.device)}
