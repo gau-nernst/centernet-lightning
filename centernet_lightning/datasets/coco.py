@@ -1,4 +1,6 @@
 import os
+import contextlib
+import io
 
 import numpy as np
 import torch
@@ -8,7 +10,7 @@ from pycocotools.coco import COCO
 from PIL import Image
 
 
-def clip_box(xywh_box, img_w, img_h):
+def _clip_box(xywh_box, img_w, img_h):
     max_x = img_w - 1
     max_y = img_h - 1
     x1, y1, w, h = xywh_box
@@ -27,14 +29,15 @@ class CocoDetection(Dataset):
             assert box_params.format == "coco"
             assert "labels" in box_params.label_fields
         
-        coco = COCO(ann_json)
+        with contextlib.redirect_stdout(io.StringIO()):     # redict pycocotools print()
+            coco = COCO(ann_json)
         cat_ids = sorted(coco.getCatIds())
         label_map = {v: i for i, v in enumerate(cat_ids)}
         inverse_label_map = {v: k for k, v in label_map.items()}
 
         img_ids = sorted(coco.getImgIds())
         imgs = coco.loadImgs(img_ids)                       # each img has keys filename, height, width, id
-        target = [coco.imgToAnns[idx] for idx in img_ids]     # each ann has keys bbox, category_id, id
+        target = [coco.imgToAnns[idx] for idx in img_ids]   # each ann has keys bbox, category_id, id
         
         img_names = [x["file_name"] for x in imgs]
         targets = [{
@@ -45,9 +48,18 @@ class CocoDetection(Dataset):
             "image_id": img["id"]
         } for img_anns, img in zip(target, imgs)]
 
-        # clip boxes to image
-        # for target in targets:
-        #     target["boxes"] = [clip_box(x, target["image_width"], target["image_height"]) for x in target["boxes"]]
+        for target in targets:
+            # clip boxes
+            target["boxes"] = [_clip_box(box, target["image_width"], target["image_height"]) for box in target["boxes"]]
+            
+            # remove empty boxes
+            boxes, labels = [], []
+            for box, label in zip(target["boxes"], target["labels"]):
+                if min(box[2:]) > 1:
+                    boxes.append(box)
+                    labels.append(label)            
+            target["boxes"] = boxes
+            target["labels"] = labels
 
         self.img_dir = img_dir
         self.img_names = img_names

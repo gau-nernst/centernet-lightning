@@ -70,12 +70,7 @@ class MetaCenterNet(pl.LightningModule):
         num_workers: int=2,
         train_data: Dict[str, Any]=None,
         val_data: Dict[str, Any]=None,
-
-        # logging
-        log_feat_map: bool=False,
-        log_values_hist: bool=False,
-        log_freq: int=500,
-        ):
+    ):
         super().__init__()
         self.save_hyperparameters()
         self.backbone = backbone
@@ -83,15 +78,12 @@ class MetaCenterNet(pl.LightningModule):
         self.heads = nn.ModuleDict(heads)
         self.stride = stride
 
-    def get_encoded_outputs(self, x: torch.Tensor, include_feat_map: bool=True) -> Dict[str, torch.Tensor]:
+    def get_encoded_outputs(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
         feat = self.backbone.forward_features(x)
         feat = self.neck(feat)
         outputs = {name: module(feat) for name, module in self.heads.items()}
-        if self.hparams.log_feat_map and include_feat_map:
-            outputs["features"] = feat
-        
         return outputs
 
     def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]):
@@ -112,22 +104,7 @@ class MetaCenterNet(pl.LightningModule):
         for k, v in losses.items():
             self.log(f"train/{k}_loss", v)
 
-        if self.hparams.log_values_hist:
-            for k, v in encoded_outputs.items():
-                self.log_histogram(f"output_values/{k}", v)
-
         return losses["total"]
-
-    def log_histogram(self, name: str, values: torch.Tensor):
-        """Log histogram. Only TensorBoard and Wandb are supported
-        """
-        if self.trainer.global_step == 0 or (self.trainer.global_step + 1) % self.hparams.log_freq == 0:
-            flatten_values = values.detach().view(-1).cpu().float().numpy()
-
-            if isinstance(self.logger, TensorBoardLogger):
-                self.logger.experiment.add_histogram(name, flatten_values, global_step=self.global_step)
-            elif isinstance(self.logger, WandbLogger):
-                self.logger.experiment.log({name: wandb.Histogram(flatten_values), "global_step": self.global_step})
 
     def configure_optimizers(self):
         if self.hparams.norm_weight_decay is not None:      # norm's weight decay = 0
