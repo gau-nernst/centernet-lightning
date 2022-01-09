@@ -1,39 +1,83 @@
+import os
+
 import numpy as np
-from torchvision import datasets
+import torch
+from torch.utils.data import Dataset
 import albumentations as A
+from pycocotools.coco import COCO
+from PIL import Image
 
 
-class CocoDetection(datasets.CocoDetection):
+def clip_box(xywh_box, img_w, img_h):
+    max_x = img_w - 1
+    max_y = img_h - 1
+    x1, y1, w, h = xywh_box
+    x2, y2 = x1 + w, y1 + h
+    x1, x2 = max(0, x1), min(max_x, x2)
+    y1, y2 = max(0, y1), min(max_y, y2)
+    return (x1, y1, x2-x1, y2-y1)
+
+
+class CocoDetection(Dataset):
     def __init__(self, img_dir, ann_json, transforms: A.Compose=None):
+        # https://github.com/facebookresearch/detectron2/blob/main/detectron2/data/datasets/coco.py
+        # https://cocodataset.org/#format-data
         if transforms is not None:
             box_params = transforms.processors["bboxes"].params
             assert box_params.format == "coco"
             assert "labels" in box_params.label_fields
         
-        super().__init__(img_dir, ann_json)
-        self._transforms = transforms
+        coco = COCO(ann_json)
+        cat_ids = sorted(coco.getCatIds())
+        label_map = {v: i for i, v in enumerate(cat_ids)}
+        inverse_label_map = {v: k for k, v in label_map.items()}
 
-        ann_keys = ("bbox", "category_id")
-        self.coco.anns = {ann_id: {k: ann[k] for k in ann_keys} for ann_id, ann in self.coco.anns.items()}
-    
-    def _load_target(self, idx):
-        target = super()._load_target(idx)
-        return {
-            "boxes": [x["bbox"] for x in target],
-            "labels": [x["category_id"] for x in target]
-        }
+        img_ids = sorted(coco.getImgIds())
+        imgs = coco.loadImgs(img_ids)                       # each img has keys filename, height, width, id
+        target = [coco.imgToAnns[idx] for idx in img_ids]     # each ann has keys bbox, category_id, id
+        
+        img_names = [x["file_name"] for x in imgs]
+        targets = [{
+            "boxes": [ann["bbox"] for ann in img_anns],
+            "labels": [label_map[ann["category_id"]] for ann in img_anns],
+            "image_width": img["width"],
+            "image_height": img["height"],
+            "image_id": img["id"]
+        } for img_anns, img in zip(target, imgs)]
+
+        # clip boxes to image
+        # for target in targets:
+        #     target["boxes"] = [clip_box(x, target["image_width"], target["image_height"]) for x in target["boxes"]]
+
+        self.img_dir = img_dir
+        self.img_names = img_names
+        self.targets = targets
+        self.transforms = transforms
+        self.num_classes = len(cat_ids)
+        self.label_map = label_map
+        self.inverse_label_map = inverse_label_map
 
     def __getitem__(self, idx):
-        img, target = super().__getitem__(idx)
-        img = np.array(img)
-        img_h, img_w = img.shape[:2]
-        target["image_width"] = img_w
-        target["image_height"] = img_h
+        img_path = os.path.join(self.img_dir, self.img_names[idx])
+        img = np.array(Image.open(img_path).convert("RGB"))
+        
+        target = self.targets[idx]
+        assert target["image_width"] == img.shape[1]
+        assert target["image_height"] == img.shape[0]
 
-        if self._transforms is not None:
-            augmented = self._transforms(image=img, bboxes=target["boxes"], labels=target["labels"])
+        if self.transforms is not None:
+            augmented = self.transforms(image=img, bboxes=target["boxes"], labels=target["labels"])
             img = augmented["image"]
             target["boxes"] = augmented["bboxes"]
             target["labels"] = augmented["labels"]
 
         return img, target
+
+    def __len__(self):
+        return len(self.img_names)
+
+
+def collate_fn(batch):
+    images = torch.stack([x[0] for x in batch], dim=0)
+    targets = tuple(x[1] for x in batch)
+    return images, targets

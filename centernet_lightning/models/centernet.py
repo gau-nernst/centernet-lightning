@@ -1,16 +1,20 @@
-from typing import List, Dict, Tuple, Union
-from functools import partial
+from typing import Any, List, Dict, Tuple, Union
 import math
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data.dataloader import DataLoader
+from torchvision.ops import box_convert
 from torchmetrics.detection.map import MAP
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 from .meta import BaseHead, MetaCenterNet
 from ..losses import heatmap_losses, box_losses
-from ..utils.box import convert_box_format
+from ..datasets.coco import CocoDetection, collate_fn
 
+from vision_toolbox import backbones, necks
 
 class HeatmapRenderer:
     def __init__(self, stride=4, **kwargs):
@@ -34,30 +38,30 @@ class HeatmapRenderer:
             cx = round(x + w/2)
             cy = round(y + h/2)
             
-            radius_x, radius_y = self.get_radius(w, h)
+            r_x, r_y = self.get_radius(w, h)
             # TODO: check CenterNet, mmdet implementation, and CenterNet2
-            radius_x = max(0, round(radius_x))
-            radius_y = max(0, round(radius_y))
-            std_x = radius_x / 3 + 1/6
-            std_y = radius_y / 3 + 1/6
+            r_x = max(0, round(r_x))
+            r_y = max(0, round(r_y))
+            std_x = r_x / 3 + 1/6
+            std_y = r_y / 3 + 1/6
             
-            l = min(cx, radius_x)
-            t = min(cy, radius_y)
-            r = min(out_w - cx, radius_x+1)
-            b = min(out_h - cy, radius_y+1)
+            l = min(cx, r_x)
+            t = min(cy, r_y)
+            r = min(out_w - cx, r_x+1)
+            b = min(out_h - cy, r_y+1)
 
             # only gaussian and heatmap are on gpu
-            grid_y = torch.arange(-radius_y, radius_y+1, device=heatmap.device).view(-1,1)
-            grid_x = torch.arange(-radius_x, radius_x+1, device=heatmap.device).view(1,-1)
+            grid_y = torch.arange(-r_y, r_y+1, device=heatmap.device).view(-1,1)
+            grid_x = torch.arange(-r_x, r_x+1, device=heatmap.device).view(1,-1)
 
             gaussian = grid_x.square() / (2 * std_x * std_x) + grid_y.square() / (2 * std_y * std_y)
             gaussian = torch.exp(-gaussian)
             gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
 
             masked_heatmap = heatmap[label, cy-t:cy+b, cx-l:cx+r]
-            masked_gaussian = gaussian[radius_y-t:radius_y+b, radius_x-l:radius_x+r]
+            masked_gaussian = gaussian[r_y-t:r_y+b, r_x-l:r_x+r]
             torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
-    
+
         return heatmap
 
 
@@ -130,13 +134,13 @@ class HeatmapHead(BaseHead):
         self.nms_kernel = nms_kernel
         self.num_detections = num_detections
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]) -> torch.Tensor:
-        heatmap = preds["heatmap"]
+    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]) -> torch.Tensor:
+        heatmap = outputs["heatmap"]
 
         target_heatmap = torch.zeros_like(heatmap)
         num_dets = 0
         for i, instances in enumerate(targets):
-            self.renderer(heatmap[i,...], instances["boxes"], instances["labels"])
+            self.renderer(target_heatmap[i,...], instances["boxes"], instances["labels"])
             num_dets += len(instances["labels"])
 
         loss = self.loss_function(heatmap, target_heatmap) / max(1, num_dets)
@@ -188,27 +192,28 @@ class Box2DHead(BaseHead):
         self.log_box = log_box
         self.box_multiplier = box_multiplier
 
-    def compute_loss(self, preds: Dict[str, torch.Tensor], targets: Tuple[Dict[str, Union[Tuple, int]]]) -> torch.Tensor:
-        box_offsets = preds["box_2d"]           # (N, 4, H, W)
+    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: Tuple[Dict[str, Union[Tuple, int]]]) -> torch.Tensor:
+        box_offsets = outputs["box_2d"]           # (N, 4, H, W)
         out_w = box_offsets.shape[-1]
 
         loss = torch.tensor(0., dtype=box_offsets.dtype, device=box_offsets.device)
         num_dets = 0
 
         for i, instances in enumerate(targets):
-            # 1. convert target boxes to xyxy and get center points
-            img_boxes = convert_box_format(torch.tensor(instances["boxes"]), "xywh", "xyxy")
-            cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride        # center points in output feature map coordinates
-            cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride
+            if len(instances["boxes"]):     # skip image without boxes
+                # 1. convert target boxes to xyxy and get center points
+                img_boxes = box_convert(torch.tensor(instances["boxes"]), "xywh", "xyxy")
+                cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride        # center points in output feature map coordinates
+                cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride
 
-            # 2. gather training samples. only center point
-            # TODO: 3x3 square
-            indices = cy.round() * out_w + cx.round()
-            pred_boxes = self.gather_and_decode(box_offsets[i], indices.long())
+                # 2. gather training samples. only center point
+                # TODO: 3x3 square
+                indices = cy.long() * out_w + cx.long()
+                pred_boxes = self.gather_and_decode(box_offsets[i], indices.to(box_offsets.device))
 
-            # 3. apply loss
-            loss += self.loss_function(pred_boxes, img_boxes)
-            num_dets += len(img_boxes)
+                # 3. apply loss
+                loss += self.loss_function(pred_boxes, img_boxes.to(box_offsets.device))
+                num_dets += len(instances["boxes"])
 
         loss = loss.sum() / max(1, num_dets)
         return loss
@@ -264,52 +269,73 @@ class CenterNet(MetaCenterNet):
     def __init__(
         self,
         num_classes: int,
-        backbone: nn.Module, 
-        neck: nn.Module,
-        
-        heatmap_prior: float=0.1,
-        heatmap_method: str="cornernet",
-        heatmap_loss: str="cornetnet_focal",
-        heatmap_weight: float=1.,
-        nms_kernel: int=3,
-        num_detections: int=300,
-        
-        box_loss: str="L1Loss",
-        log_box: bool=False,
-        box_multiplier: float=1,
-        box_weight: float=1.,
-
+        backbone: str,
+        pretrained_backbone: bool=False,
+        neck: str="FPN",
+        neck_config: Dict[str, Any]=None,
+        heatmap_config: Dict[str, Any]=None,
+        box2d_config: Dict[str, Any]=None,
         **kwargs
         ):
+        backbone: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
+        
+        if neck_config is None: neck_config = {}
+        neck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
+        stride = backbone.stride // neck.stride
+
+        if heatmap_config is None: heatmap_config = {}
+        if box2d_config is None: box2d_config = {}
         heads = {
-            "heatmap": partial(
-                HeatmapHead, num_classes=num_classes, heatmap_prior=heatmap_prior,
-                target_method=heatmap_method, loss_function=heatmap_loss, loss_weight=heatmap_weight,
-                nms_kernel=nms_kernel, num_detections=num_detections
-            ),
-            "box_2d": partial(Box2DHead, loss_function=box_loss, log_box=log_box, box_multiplier=box_multiplier, loss_weight=box_weight)
+            "heatmap": HeatmapHead(neck.out_channels, num_classes, stride=stride, **heatmap_config),
+            "box_2d": Box2DHead(neck.out_channels, stride=stride, **box2d_config)
         }
-        super().__init__(backbone, neck, heads, **kwargs)
+        super().__init__(backbone, neck, heads, stride=stride, **kwargs)
         self.metric = MAP()
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
         outputs = self.get_encoded_outputs(images)
-        losses = self.compute_loss(outputs, targets)
-        for k, v in losses.items():
-            self.log(f"val/{k}_loss", v)
-        
+
         preds = self.gather_detections(outputs["heatmap"].sigmoid(), outputs["box_2d"])
-        preds = [{k: v[i]} for i, (k, v) in enumerate(preds.items())]               # convert dict to list
+        preds = [{k: v[i] for k, v in preds.items()} for i in range(len(targets))]  # convert dict to list
         
-        target_keys = ("boxes", "labels")
-        targets = [{k: torch.tensor(x[k]) for k in target_keys} for x in targets]   # extract required keys
-        targets["boxes"] = convert_box_format(targets["boxes"], "xywh", "xyxy")
+        # extract required keys
+        targets = [{
+            "boxes": box_convert(torch.tensor(x["boxes"], device=self.device), "xywh", "xyxy"),
+            "labels": torch.tensor(x["labels"], device=self.device)
+        } for x in targets]
 
         # TODO: scale to original image size to get correct AP small, medium, large?
         self.metric.update(preds, targets)
     
-    def gather_detections(self, heatmap: torch.Tensor, box_offsets: torch.Tensor, normalize_boxes: bool=False, img_widths: List[int]=None, img_heights: List[int]=None) -> Dict[str, torch.Tensor]:
+    def get_dataloader(self, train=True):
+        if train:
+            config = self.hparams.train_data
+            min_area = 1
+            shuffle = True
+        else:
+            config = self.hparams.val_data
+            min_area = -1        # don't remove boxes for validation set
+            shuffle = False
+
+        ts = []
+        for t in config["transforms"]:
+            t_fn = A.__dict__[t["name"]]
+            ts.append(t_fn(**t["init_args"]) if "init_args" in t else t_fn())
+        ts.append(ToTensorV2())
+        
+        transforms = A.Compose(ts, bbox_params=dict(format="coco", label_fields=["labels"], min_area=min_area))
+        ds = CocoDetection(config["img_dir"], config["ann_json"], transforms=transforms)
+
+        return DataLoader(ds, batch_size=self.hparams.batch_size, shuffle=shuffle, collate_fn=collate_fn, pin_memory=True)
+
+    def train_dataloader(self):
+        return self.get_dataloader(train=True)
+    
+    def val_dataloader(self):
+        return self.get_dataloader(train=False)
+
+    def gather_detections(self, heatmap: torch.Tensor, box_offsets: torch.Tensor, normalize_boxes: bool=False) -> Dict[str, torch.Tensor]:
         """Decode model outputs for detection task
 
         Args:
@@ -321,16 +347,8 @@ class CenterNet(MetaCenterNet):
         
         Returns: a Dict with keys boxes, scores, labels
         """
-        if not normalize_boxes:
-            assert img_widths is not None and img_heights is not None
-        
         scores, indices, labels = self.heads["heatmap"].gather_topk(heatmap)
-        boxes = self.heads["box_2d"].gather_and_decode(box_offsets, indices, normalize_boxes=True)
-        if not normalize_boxes:
-            for i, (img_w, img_h) in zip(img_widths, img_heights):
-                boxes[i,:,[0,2]] *= img_w
-                boxes[i,:,[1,3]] *= img_h
-
+        boxes = self.heads["box_2d"].gather_and_decode(box_offsets, indices, normalize_boxes=normalize_boxes)
         return {
             "boxes": boxes,
             "scores": scores,

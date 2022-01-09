@@ -1,3 +1,4 @@
+from typing import Any, Dict
 import torch
 from torch import nn
 
@@ -73,6 +74,12 @@ class EmbeddingHead(BaseHead):
 
 
 class FairMOT(MetaCenterNet):
+    def __init__(
+        *args,
+        embedding_config: Dict[str, Any]
+    ):
+        super().__init__()
+        
     # rank 1 only?
     def on_validation_epoch_start(self):
         self.tracker = Tracker(device=self.device)
