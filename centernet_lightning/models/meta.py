@@ -30,9 +30,12 @@ class BaseHead(nn.Module):
         layers = []
         for i in range(depth):
             in_c = in_channels if i == 0 else width
-            layers.append(nn.Conv2d(in_c, width, 3, padding=1))
-            layers.append(nn.ReLU(inplace=True))            
-            nn.init.kaiming_normal_(layers[-2].weight, mode="fan_out", nonlinearity="relu")
+            layers.extend([
+                nn.Conv2d(in_c, width, 3, padding=1, bias=False),
+                nn.BatchNorm2d(width),
+                nn.ReLU(inplace=True)
+            ])            
+            nn.init.kaiming_normal_(layers[-3].weight, mode="fan_out", nonlinearity="relu")
         
         layers.append(nn.Conv2d(width, out_channels, 1))
         if init_bias is not None:

@@ -203,8 +203,7 @@ class Box2DHead(BaseHead):
         box_offsets = box_offsets.flatten(start_dim=-2)
         if log_box:
             box_offsets = torch.exp(box_offsets)
-        if box_multiplier > 1:
-            box_offsets *= box_multiplier
+        box_offsets = box_offsets * box_multiplier      # *= will multiply inplace -> cannot call .backward()
         box_offsets = box_offsets.clamp_min(0)
 
         # boxes are in output feature maps coordinates
