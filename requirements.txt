@@ -3,10 +3,9 @@ torchvision>=0.11.0
 numpy
 scipy
 filterpy
-cython
 pytorch-lightning
-torchmetrics
 opencv-python
 albumentations>=1.0.0
-pycocotols @ git+https://github.com/gautamchitnis/cocoapi.git@cocodataset-master#subdirectory=PythonAPI
+pycocotools
 trackeval @ git+https://github.com/JonathonLuiten/TrackEval.git
+vision-toolbox @ git+https://github.com/gau-nernst/vision-toolbox.git
