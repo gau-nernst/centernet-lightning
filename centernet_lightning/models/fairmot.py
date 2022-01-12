@@ -85,7 +85,7 @@ class FairMOT(MetaCenterNet):
         self.tracker = Tracker(device=self.device)
     
     def validation_step(self, batch, batch_idx):
-        encoded_outputs = self.get_encoded_outputs(batch["image"])
+        encoded_outputs = self.get_output_dict(batch["image"])
         losses = self.compute_loss(encoded_outputs, batch, ignore_reid=True)    # during validation, only evaluate detection loss
         for k,v in losses.items():
             self.log(f"val/{k}_loss", v)

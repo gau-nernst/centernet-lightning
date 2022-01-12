@@ -5,12 +5,9 @@ import torch
 from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pytorch_lightning as pl
-from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
-try:
-    import wandb
-except ImportError:
-    wandb = None
 
+from vision_toolbox.backbones import BaseBackbone
+from vision_toolbox.necks import BaseNeck
 
 _optimizers = {
     "SGD": partial(torch.optim.SGD, momentum=0.9),
@@ -55,10 +52,11 @@ class MetaCenterNet(pl.LightningModule):
     """
     def __init__(
         self,
-        backbone: nn.Module,
-        neck: nn.Module,
+        backbone: BaseBackbone,
+        neck: BaseNeck,
         heads: Dict[str, BaseHead],
         stride: int,
+        extra_block: nn.Module=None,
 
         # optimizer and scheduler
         optimizer: str="SGD",
@@ -75,16 +73,19 @@ class MetaCenterNet(pl.LightningModule):
         val_data: Dict[str, Any]=None,
     ):
         super().__init__()
-        self.save_hyperparameters()
         self.backbone = backbone
+        self.extra_block = extra_block
         self.neck = neck
         self.heads = nn.ModuleDict(heads)
         self.stride = stride
 
-    def get_encoded_outputs(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def get_output_dict(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
         """
         feat = self.backbone.forward_features(x)
+        if self.extra_block is not None:        # e.g. SPP
+            feat[-1] = self.extra_block(feat[-1])
+        
         feat = self.neck(feat)
         outputs = {name: module(feat) for name, module in self.heads.items()}
         return outputs
@@ -102,7 +103,7 @@ class MetaCenterNet(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
-        encoded_outputs = self.get_encoded_outputs(images)
+        encoded_outputs = self.get_output_dict(images)
         losses = self.compute_loss(encoded_outputs, targets)
         for k, v in losses.items():
             self.log(f"train/{k}_loss", v)

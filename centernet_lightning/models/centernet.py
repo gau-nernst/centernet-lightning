@@ -153,24 +153,45 @@ class Box2DHead(BaseHead):
 
     def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: Tuple[Dict[str, Union[Tuple, int]]]) -> torch.Tensor:
         box_offsets = outputs["box_2d"]           # (N, 4, H, W)
-        out_w = box_offsets.shape[-1]
+        out_h, out_w = box_offsets.shape[-2:]
 
         num_dets = sum([len(x["boxes"]) for x in targets])
         loss = torch.tensor(0., dtype=box_offsets.dtype, device=box_offsets.device)
         for i, instances in enumerate(targets):
-            if len(instances["boxes"]):     # skip image without boxes
-                # 1. convert target boxes to xyxy and get center points
-                img_boxes = box_convert(torch.tensor(instances["boxes"]), "xywh", "xyxy")
-                cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride        # center points in output feature map coordinates
-                cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride
+            if len(instances["boxes"]) == 0:
+                continue        # skip image without boxes
 
-                # 2. gather training samples. only center point
-                # TODO: 3x3 square
-                indices = cy.long() * out_w + cx.long()
-                pred_boxes = Box2DHead.gather_and_decode_boxes(box_offsets[i], indices.to(box_offsets.device), stride=self.stride, **self.box_params)
+            boxes = []
+            indices = []
+            for box in instances["boxes"]:
+                x, y, w, h = [d/self.stride for d in box]       # convert to feature map coordinates
+                cx, cy = int(x + w/2), int(y + h/2)
+                cxs = [d for d in [cx-1, cx, cx+1] if d > 0 and d < out_w-1]
+                cys = [d for d in [cy-1, cy, cy+1] if d > 0 and d < out_h-1]
 
-                # 3. apply loss
-                loss += self.loss_function(pred_boxes, img_boxes.to(box_offsets.device))
+                for cx in cxs:
+                    for cy in cys:
+                        boxes.append(box)       # xywh
+                        indices.append(cy * out_w + cx)
+
+            target_boxes = box_convert(torch.tensor(boxes), "xywh", "xyxy").to(box_offsets.device)
+            pred_boxes = Box2DHead.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices).to(box_offsets.device), stride=self.stride, **self.box_params)
+            loss += self.loss_function(pred_boxes, target_boxes)
+
+
+            # # 1. convert target boxes to xyxy and get center points
+            # img_boxes = box_convert(torch.tensor(instances["boxes"]), "xywh", "xyxy")
+            # cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride        # center points in output feature map coordinates
+            # cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride
+
+            # # 2. gather training samples. only center point
+            # # TODO: 3x3 square
+            # # method: permutate, get (cx-1, cx, cx+1) x (cy-1, cy, cy+1)
+            # indices = cy.long() * out_w + cx.long()
+            # pred_boxes = Box2DHead.gather_and_decode_boxes(box_offsets[i], indices.to(box_offsets.device), stride=self.stride, **self.box_params)
+
+            # # 3. apply loss
+            # loss += self.loss_function(pred_boxes, img_boxes.to(box_offsets.device))
 
         loss = loss / max(1, num_dets)
         return loss
@@ -242,20 +263,22 @@ class CenterNet(MetaCenterNet):
 
         **kwargs
     ):
+        self.save_hyperparameters()
         neck_config = deepcopy(neck_config) if neck_config is not None else {}
         heatmap_config = deepcopy(heatmap_config) if heatmap_config is not None else {}
         box2d_config = deepcopy(box2d_config) if box2d_config is not None else {}
 
         backbone: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
         
-        neck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
+        neck: necks.BaseNeck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
         stride = backbone.stride // neck.stride
 
-        heatmap_head = HeatmapHead(neck.out_channels, num_classes, stride=stride, **heatmap_config)
-        box2d_head = Box2DHead(neck.out_channels, stride=stride, **box2d_config)
+        heatmap_head = HeatmapHead(neck.get_out_channels(), num_classes, stride=stride, **heatmap_config)
+        box2d_head = Box2DHead(neck.get_out_channels(), stride=stride, **box2d_config)
         heads = {"heatmap": heatmap_head, "box_2d": box2d_head}
         
         super().__init__(backbone, neck, heads, stride=stride, **kwargs)
+        self.num_classes = num_classes
         self.evaluator = CocoEvaluator(num_classes)
         self.decode_params = {
             "nms_kernel": nms_kernel,
@@ -265,21 +288,27 @@ class CenterNet(MetaCenterNet):
         }
     
     def forward(self, x: torch.Tensor):
-        outputs = self.get_encoded_outputs(x)
+        outputs = self.get_output_dict(x)
         return outputs["heatmap"], outputs["box_2d"]
+
+    def predict(self, x: torch.Tensor, **kwargs):
+        """Override decode parameters with keyword arguments. Decode paramms: nms_kernel, num_detections
+        """
+        decode_params = deepcopy(self.decode_params)
+        for k, v in kwargs.items():
+            if k in decode_params:
+                decode_params[k] = v
+
+        heatmap, box_offsets = self(x)
+        return CenterNet.decode_detections(heatmap.sigmoid(), box_offsets, **decode_params)
 
     def validation_step(self, batch, batch_idx):
         images, targets = batch
-        batch_size = images.shape[0]
-        heatmap, box_offsets = self(images)
-
-        decode_params = deepcopy(self.decode_params)
-        decode_params["num_detections"] = 100           # override this since pycocotools only consider 100 detections
-        preds = CenterNet.decode_detections(heatmap.sigmoid(), box_offsets, **decode_params)
-
-        preds["boxes"] = box_convert(preds["boxes"], "xyxy", "xywh")                # coco box format
-        preds = {k: v.cpu().numpy() for k, v in preds.items()}                      # convert to numpy
-        preds = [{k: v[i] for k, v in preds.items()} for i in range(batch_size)]    # convert to list of images
+        
+        preds = self.predict(images, num_detections=100)                                # pycocotools consider max of 100 detections
+        preds["boxes"] = box_convert(preds["boxes"], "xyxy", "xywh")                    # coco box format
+        preds = {k: v.cpu().numpy() for k, v in preds.items()}                          # convert to numpy
+        preds = [{k: v[i] for k, v in preds.items()} for i in range(images.shape[0])]   # convert to list of images
         
         targets = [{k: np.array(target[k]) for k in ("boxes", "labels")} for target in targets]     # filter keys and convert to numpy array
         
@@ -293,12 +322,7 @@ class CenterNet(MetaCenterNet):
             self.log(f"val/{k}", v)
  
     def get_dataloader(self, train=True):
-        if train:
-            config = self.hparams.train_data
-            shuffle = True
-        else:
-            config = self.hparams.val_data
-            shuffle = False
+        config = self.hparams.train_data if train else self.hparams.val_data
 
         ts = []
         for t in config["transforms"]:
@@ -311,7 +335,7 @@ class CenterNet(MetaCenterNet):
 
         return DataLoader(
             ds, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers,
-            shuffle=shuffle, collate_fn=collate_fn, pin_memory=True
+            shuffle=train, collate_fn=collate_fn, pin_memory=True
         )
 
     def train_dataloader(self):

@@ -14,21 +14,13 @@ To read more about the architecture and code structure of this implementation, s
 
 ## Install
 
-Clone this repo and navigate to the repo directory
+Dependencies
 
 ```bash
-git clone https://github.com/gau-nernst/centernet-lightning.git
-cd centernet-lightning
+conda install pytorch torchvision cudatoolkit=11.3 -c pytorch
+pip install pytorch-lightning torchmetrics albumentations git+https://github.com/gau-nernst/vision-toolbox.git
+pip install filterpy git+https://github.com/JonathonLuiten/TrackEval.git        # for FairMOT
 ```
-
-Install using `environment.yml`
-
-```bash
-conda env create -f environment.yml
-conda activate centernet
-```
-
-For more detailed instructions, see [install.md](docs/install.md)
 
 ## Inference
 

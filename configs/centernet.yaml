@@ -1,0 +1,92 @@
+model:
+  num_classes: 80
+  backbone: vovnet39
+  pretrained_backbone: True
+
+  neck: FPN
+  neck_config:
+    out_channels: 256
+
+  heatmap_config:
+    width: &head_width 256
+    depth: &head_depth 3
+    loss_weight: 1.
+    heatmap_prior: 0.01
+
+  #   heatmap_method: "cornernet"
+  #   radius: 1.               # for fixed radius
+  #   min_overlap: 0.3         # for cornetnet
+  #   alpha: 0.54              # for ttfnet
+  #   loss_function: "CornerNetFocalLoss"
+  #   nms_kernel: 3
+  #   num_detections: 300
+  
+  box2d_config:
+    width: *head_width
+    depth: *head_depth
+    loss_weight: 5.         # 0.1 for L1Loss
+    # init_bias: 10.
+    box_multiplier: 16
+    loss_function: GIoULoss
+
+  # optimizer and scheduler
+  optimizer: AdamW
+  lr: 0.00025               # 5e-4 for batch size 128
+  weight_decay: 0.001
+  norm_weight_decay: 0.
+  warmup_epochs: 5
+  warmup_decay: 0.01
+
+  # data
+  batch_size: 32
+  num_workers: 4
+
+  train_data:
+    img_dir: ../acct3001_02/datasets/COCO/images/train2017
+    ann_json: ../acct3001_02/datasets/COCO/annotations/instances_train2017.json
+    transforms:
+      - name: HorizontalFlip
+      - name: RandomResizedCrop
+        init_args:
+          height: 512
+          width: 512
+      - name: ColorJitter
+        init_args:
+          brightness: 0.4
+          contrast: 0.4
+          saturation: 0.4
+      - name: Normalize
+
+  val_data:
+    img_dir: ../acct3001_02/datasets/COCO/images/val2017
+    ann_json: ../acct3001_02/datasets/COCO/annotations/instances_val2017.json
+    transforms:
+      - name: Resize
+        init_args:
+          height: 512
+          width: 512
+      - name: Normalize
+
+trainer:
+  gpus: 2
+  strategy: ddp
+  precision: 16
+  benchmark: true
+  sync_batchnorm: true
+  max_epochs: 100
+
+  # limit_train_batches: 200
+  # limit_val_batches: 20
+
+  logger:
+    - class_path: pytorch_lightning.loggers.WandbLogger
+      init_args:
+        project: centernet
+        log_model: true
+
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val/mAP
+        mode: max

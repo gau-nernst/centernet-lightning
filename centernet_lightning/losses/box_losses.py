@@ -62,7 +62,7 @@ class GIoULoss(nn.Module):
         self.reduction = reduction
         self.keepdim = keepdim      # keepdim is to comply dimension with L1 loss
 
-    def forward(self, boxes1: torch.Tensor, boxes2: torch.Tensor, eps=1e-8):
+    def forward(self, boxes1: torch.Tensor, boxes2: torch.Tensor, eps: float=1e-8):
         intersection, union = _get_iou(boxes1, boxes2)
         iou = intersection / (union + eps)
 
