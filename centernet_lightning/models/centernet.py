@@ -155,7 +155,7 @@ class Box2DHead(BaseHead):
         box_offsets = outputs["box_2d"]           # (N, 4, H, W)
         out_h, out_w = box_offsets.shape[-2:]
 
-        num_dets = sum([len(x["boxes"]) for x in targets])
+        num_dets = 0
         loss = torch.tensor(0., dtype=box_offsets.dtype, device=box_offsets.device)
         for i, instances in enumerate(targets):
             if len(instances["boxes"]) == 0:
@@ -177,6 +177,7 @@ class Box2DHead(BaseHead):
             target_boxes = box_convert(torch.tensor(boxes), "xywh", "xyxy").to(box_offsets.device)
             pred_boxes = Box2DHead.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices).to(box_offsets.device), stride=self.stride, **self.box_params)
             loss += self.loss_function(pred_boxes, target_boxes)
+            num_dets += len(boxes)
 
 
             # # 1. convert target boxes to xyxy and get center points
@@ -192,6 +193,7 @@ class Box2DHead(BaseHead):
 
             # # 3. apply loss
             # loss += self.loss_function(pred_boxes, img_boxes.to(box_offsets.device))
+            # num_dets += len(instances["boxes"])
 
         loss = loss / max(1, num_dets)
         return loss
