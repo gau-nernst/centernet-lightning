@@ -14,10 +14,17 @@ Config
 - GPU: 2x 3090 DDP
 - SyncBN
 
-Backbone | Neck | Head | Box params | mAP | Batch size
----------|------|------|------------|-----|-----------
-ResNet-34 (21.3M) | FPN (dim=128, 0.6M) | w=128, d=2 (0.6M) | multiplier=16, loss=L1, loss_weight=0.1 | 18.6 | 128
-VoVNet-39 (25.2M) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | multiplier=16, loss=GIoU, loss_weight=5.  | 34.6 | 64
+Notes:
+
+- AP small / medium / large are reported on 512 x 512 size, not the original sizes.
+- ^ means "same as above"
+
+Backbone | Neck | Head | Heatmap | Box | Batch size | mAP | AP small | AP medium | AP large
+---------|------|------|---------|-----|------------|-----|----------|-----------|----------
+ResNet-34 (21.3M) | FPN (dim=128, 0.6M) | w=128, d=2 (0.6M) | radius=cornernet | multiplier=16, loss=L1, loss_weight=0.1 | 128 | 18.6 | 30.2 | 14.9 | 3.4
+VoVNet-39 (25.2M) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | ^ | multiplier=16, loss=GIoU, loss_weight=5. | 64 | 34.6 | 50.9 | 32.8 | 9.5
+^ | ^ | ^ | ^ | ^ and 3x3 center sampling for box regression | ^ | 37.3 | 52.4 | 35.0 | 13.4
+^ | ^ | ^ | radius=2 | ^ | ^ | xx.x | xx.x | xx.x | xx.x
 
 ## August 2021
 
@@ -33,7 +40,7 @@ VoVNet-39 (25.2M) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | multiplier=16, los
 Neck | Optimizer | LR | mAP | Remarks
 -----|-----------|----|-----|---------
 FPN | Adam | 5e-4 | null | Loss explodes at epoch 79
-FPN | SGD | 5e-2 | 1.1 | 
+FPN | SGD | 5e-2 | 1.1 |
 FPN | AdamW | 5e-4 | 25.8 | Baseline
 FPN | AdamW | 5e-3 | 24.3 | -1.5 mAP
 Weighted FPN | AdamW | 5e-4 | 26.3 | +0.5 mAP

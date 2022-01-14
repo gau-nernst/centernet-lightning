@@ -1,23 +1,24 @@
 from copy import deepcopy
-from typing import Any, Callable, List, Dict, Tuple, Union
+from typing import Any, List, Dict, Tuple, Union
 import math
 
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from torchvision.ops import box_convert
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from vision_toolbox import backbones, necks
 
 from .meta import BaseHead, MetaCenterNet
 from ..losses import heatmap_losses, box_losses
 from ..datasets.coco import CocoDetection, collate_fn
+from ..datasets import transforms
 from ..eval.coco import CocoEvaluator
 
-from vision_toolbox import backbones, necks
 
+_transforms = {**A.__dict__, **transforms.__dict__}
 
 class HeatmapHead(BaseHead):
     def __init__(
@@ -265,7 +266,6 @@ class CenterNet(MetaCenterNet):
 
         **kwargs
     ):
-        self.save_hyperparameters()
         neck_config = deepcopy(neck_config) if neck_config is not None else {}
         heatmap_config = deepcopy(heatmap_config) if heatmap_config is not None else {}
         box2d_config = deepcopy(box2d_config) if box2d_config is not None else {}
@@ -288,6 +288,7 @@ class CenterNet(MetaCenterNet):
             "stride": stride,
             **box2d_head.box_params
         }
+        self.save_hyperparameters()
     
     def forward(self, x: torch.Tensor):
         outputs = self.get_output_dict(x)
@@ -328,8 +329,9 @@ class CenterNet(MetaCenterNet):
 
         ts = []
         for t in config["transforms"]:
-            t_fn = A.__dict__[t["name"]]
-            ts.append(t_fn(**t["init_args"]) if "init_args" in t else t_fn())
+            t_fn = _transforms[t["name"]]
+            init_args = t["init_args"] if "init_args" in t else {}
+            ts.append(t_fn(**init_args))
         ts.append(ToTensorV2())
         
         transforms = A.Compose(ts, bbox_params=dict(format="coco", label_fields=["labels"], min_area=1))
