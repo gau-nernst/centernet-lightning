@@ -8,3 +8,4 @@ wandb/
 *results.json
 *.pt
 *.pth
+*.ckpt
