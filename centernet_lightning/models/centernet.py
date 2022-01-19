@@ -1,17 +1,19 @@
 from copy import deepcopy
-from typing import Any, List, Dict, Tuple, Union
+from typing import Any, Callable, List, Dict, Tuple, Union
 import math
 
 import numpy as np
 import torch
+from torch import nn
 import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from torchvision.ops import box_convert
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from vision_toolbox import backbones, necks
+from vision_toolbox.components import ConvBnAct
 
-from .meta import BaseHead, MetaCenterNet
+from .meta import GenericHead, MetaCenterNet
 from ..losses import heatmap_losses, box_losses
 from ..datasets.coco import CocoDetection, collate_fn
 from ..datasets import transforms
@@ -260,9 +262,21 @@ class CenterNet(MetaCenterNet):
         heatmap_config: Dict[str, Any]=None,
         box2d_config: Dict[str, Any]=None,
 
+        head_width: int=256,
+        head_depth: int=3,
+        head_block: Callable=ConvBnAct,
+        heatmap_prior: float=0.01,
+        box_init_bias: float=None,
+
         # inference config
         nms_kernel: int=3,
         num_detections: int=300,
+
+        # data
+        batch_size: int=8,
+        num_workers: int=2,
+        train_data: Dict[str, Any]=None,
+        val_data: Dict[str, Any]=None,
 
         **kwargs
     ):
@@ -271,23 +285,29 @@ class CenterNet(MetaCenterNet):
         box2d_config = deepcopy(box2d_config) if box2d_config is not None else {}
 
         backbone: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
-        
         neck: necks.BaseNeck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
         stride = backbone.stride // neck.stride
 
-        heatmap_head = HeatmapHead(neck.get_out_channels(), num_classes, stride=stride, **heatmap_config)
-        box2d_head = Box2DHead(neck.get_out_channels(), stride=stride, **box2d_config)
-        heads = {"heatmap": heatmap_head, "box_2d": box2d_head}
-        
-        super().__init__(backbone, neck, heads, stride=stride, **kwargs)
+        # heatmap_head = HeatmapHead(neck.get_out_channels(), num_classes, stride=stride, **heatmap_config)
+        # box2d_head = Box2DHead(neck.get_out_channels(), stride=stride, **box2d_config)
+        # heads = {"heatmap": heatmap_head, "box_2d": box2d_head}
+
+        head_in_c = neck.get_out_channels()
+        heatmap_init_bias = math.log(heatmap_prior/(1-heatmap_prior))
+        heads = nn.Module()
+        heads.add_module("heatmap", GenericHead(head_in_c, num_classes, width=head_width, depth=head_depth, block=head_block, init_bias=heatmap_init_bias))
+        heads.add_module("box_2d", GenericHead(head_in_c, 4, width=head_width, depth=head_depth, block=head_block, init_bias=box_init_bias))
+
+        super().__init__(backbone, neck, heads, **kwargs)
         self.num_classes = num_classes
+        self.stride = stride
         self.evaluator = CocoEvaluator(num_classes)
-        self.decode_params = {
-            "nms_kernel": nms_kernel,
-            "num_detections": num_detections,
-            "stride": stride,
-            **box2d_head.box_params
-        }
+        # self.decode_params = {
+        #     "nms_kernel": nms_kernel,
+        #     "num_detections": num_detections,
+        #     "stride": stride,
+        #     **box2d_head.box_params
+        # }
         self.save_hyperparameters()
     
     def forward(self, x: torch.Tensor):

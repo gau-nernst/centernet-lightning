@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 
 from vision_toolbox.backbones import BaseBackbone
 from vision_toolbox.necks import BaseNeck
+from vision_toolbox.components import ConvBnAct
 
 _optimizers = {
     "SGD": partial(torch.optim.SGD, momentum=0.9),
@@ -16,35 +17,36 @@ _optimizers = {
     "RMSprop": partial(torch.optim.RMSprop, momentum=0.9)
 }
 
-
-class BaseHead(nn.Module):
-    # Reference implementations
-    # https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py     num_filters = 256
-    # https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py                                     num_filters = in_channels
-    def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=1, init_bias: float=None, loss_weight: float=1.):
+# Reference implementations
+# https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py     num_filters = 256
+# https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py                                     num_filters = in_channels
+class GenericHead(nn.Sequential):
+    def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=1, block=ConvBnAct, init_bias: float=None):
         super().__init__()
-        self.loss_weight = loss_weight
-        layers = []
         for i in range(depth):
             in_c = in_channels if i == 0 else width
-            layers.extend([
-                nn.Conv2d(in_c, width, 3, padding=1, bias=False),
-                nn.BatchNorm2d(width),
-                nn.ReLU(inplace=True)
-            ])            
-            nn.init.kaiming_normal_(layers[-3].weight, mode="fan_out", nonlinearity="relu")
-        
-        layers.append(nn.Conv2d(width, out_channels, 1))
+            self.add_module(f"block_{i+1}", block(in_c, width))
+
+        self.out_conv = nn.Conv2d(width, out_channels, 1)
         if init_bias is not None:
-            layers[-1].bias.data.fill_(init_bias)
-        
-        self.layers = nn.Sequential(*layers)
+            self.out_conv.bias.data.fill_(init_bias)
 
-    def forward(self, x):
-        return self.layers(x)
 
-    def compute_loss(self, outputs, target):
-        pass
+class GenericModel(nn.Module):
+    def __init__(self, backbone: BaseBackbone, neck: BaseNeck, heads: nn.Module, extra_block=None):
+        super().__init__()
+        self.backbone = backbone
+        self.neck = neck
+        self.heads = heads
+        self.extra_block = extra_block
+    
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        out = self.backbone.forward_features(x)
+        out = self.neck(out)
+        if self.extra_block is not None:        # e.g. SPP
+            out = self.extra_block(out)
+        out = {name: head(out) for name, head in self.heads.named_children()}
+        return out
 
 
 class MetaCenterNet(pl.LightningModule):
@@ -52,10 +54,10 @@ class MetaCenterNet(pl.LightningModule):
     """
     def __init__(
         self,
+        # model
         backbone: BaseBackbone,
         neck: BaseNeck,
-        heads: Dict[str, BaseHead],
-        stride: int,
+        heads: nn.Module,
         extra_block: nn.Module=None,
 
         # optimizer and scheduler
@@ -67,39 +69,45 @@ class MetaCenterNet(pl.LightningModule):
         warmup_decay: float=0.01,
         
         # data
-        batch_size: int=8,
-        num_workers: int=2,
-        train_data: Dict[str, Any]=None,
-        val_data: Dict[str, Any]=None,
+        # batch_size: int=8,
+        # num_workers: int=2,
+        # train_data: Dict[str, Any]=None,
+        # val_data: Dict[str, Any]=None,
+
+        jit: bool=False
     ):
         super().__init__()
-        self.backbone = backbone
-        self.extra_block = extra_block
-        self.neck = neck
-        self.heads = nn.ModuleDict(heads)
-        self.stride = stride
+        # self.backbone = backbone
+        # self.extra_block = extra_block
+        # self.neck = neck
+        # self.heads = nn.ModuleDict(heads)
+        self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
+        if jit:
+            self.model = torch.jit.script(self.model)
 
     def get_output_dict(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
-        """
-        feat = self.backbone.forward_features(x)
-        if self.extra_block is not None:        # e.g. SPP
-            feat[-1] = self.extra_block(feat[-1])
+    #     """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
+    #     """
+    #     feat = self.backbone.forward_features(x)
+    #     if self.extra_block is not None:        # e.g. SPP
+    #         feat[-1] = self.extra_block(feat[-1])
         
-        feat = self.neck(feat)
-        outputs = {name: module(feat) for name, module in self.heads.items()}
-        return outputs
+    #     feat = self.neck(feat)
+    #     outputs = {name: module(feat) for name, module in self.heads.items()}
+    #     return outputs
+        return self.model(x)
 
-    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]):
-        """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
-        """
-        losses = {"total": torch.tensor(0., device=self.device)}
-        for name, module in self.heads.items():
-            module: BaseHead
-            losses[name] = module.compute_loss(outputs, targets)
-            losses["total"] += losses[name] * module.loss_weight
+    def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]) -> Dict[str, torch.Tensor]:
+        pass
+    #     """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
+    #     """
+    #     losses = {"total": torch.tensor(0., device=self.device)}
+    #     for name, module in self.heads.items():
+    #         module: BaseHead
+    #         losses[name] = module.compute_loss(outputs, targets)
+    #         losses["total"] += losses[name] * module.loss_weight
 
-        return losses
+    #     return losses
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
