@@ -49,9 +49,7 @@ class GenericModel(nn.Module):
         return out
 
 
-class MetaCenterNet(pl.LightningModule):
-    """Meta architecture for CenterNet. Implement training logic
-    """
+class GenericLightning(pl.LightningModule):
     def __init__(
         self,
         # model
@@ -59,6 +57,7 @@ class MetaCenterNet(pl.LightningModule):
         neck: BaseNeck,
         heads: nn.Module,
         extra_block: nn.Module=None,
+        jit: bool=False,
 
         # optimizer and scheduler
         optimizer: str="SGD",
@@ -66,57 +65,33 @@ class MetaCenterNet(pl.LightningModule):
         weight_decay: float=2e-5,
         norm_weight_decay: float=0,
         warmup_epochs: int=5,
-        warmup_decay: float=0.01,
-        
-        # data
-        # batch_size: int=8,
-        # num_workers: int=2,
-        # train_data: Dict[str, Any]=None,
-        # val_data: Dict[str, Any]=None,
-
-        jit: bool=False
+        warmup_decay: float=0.01
     ):
         super().__init__()
-        # self.backbone = backbone
-        # self.extra_block = extra_block
-        # self.neck = neck
-        # self.heads = nn.ModuleDict(heads)
         self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
         if jit:
             self.model = torch.jit.script(self.model)
 
-    def get_output_dict(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-    #     """Return encoded outputs, a dict of output feature maps. Use this output to either compute loss or decode to detections. Heatmap is before sigmoid
-    #     """
-    #     feat = self.backbone.forward_features(x)
-    #     if self.extra_block is not None:        # e.g. SPP
-    #         feat[-1] = self.extra_block(feat[-1])
-        
-    #     feat = self.neck(feat)
-    #     outputs = {name: module(feat) for name, module in self.heads.items()}
-    #     return outputs
-        return self.model(x)
-
     def compute_loss(self, outputs: Dict[str, torch.Tensor], targets: List[Dict[str, Union[List, int]]]) -> Dict[str, torch.Tensor]:
         pass
-    #     """Return a dict of losses for each output head, and weighted total loss. This method is called during the training step
-    #     """
-    #     losses = {"total": torch.tensor(0., device=self.device)}
-    #     for name, module in self.heads.items():
-    #         module: BaseHead
-    #         losses[name] = module.compute_loss(outputs, targets)
-    #         losses["total"] += losses[name] * module.loss_weight
 
-    #     return losses
+    def get_dataloader(self, train=True):
+        pass
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
-        encoded_outputs = self.get_output_dict(images)
-        losses = self.compute_loss(encoded_outputs, targets)
+        outputs = self.model(images)
+        losses = self.compute_loss(outputs, targets)
         for k, v in losses.items():
             self.log(f"train/{k}_loss", v)
 
         return losses["total"]
+
+    def train_dataloader(self):
+        return self.get_dataloader(train=True)
+    
+    def val_dataloader(self):
+        return self.get_dataloader(train=False)
 
     def configure_optimizers(self):
         if self.hparams.norm_weight_decay is not None:      # norm's weight decay = 0

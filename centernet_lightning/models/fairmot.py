@@ -2,7 +2,7 @@ from typing import Any, Dict
 import torch
 from torch import nn
 
-from .meta import MetaCenterNet, BaseHead
+from .meta import GenericLightning, BaseHead
 from .tracker import Tracker
 from ..utils import convert_box_format
 from ..eval import evaluate_mot_tracking_sequence
@@ -73,7 +73,7 @@ class EmbeddingHead(BaseHead):
         return embeddings
 
 
-class FairMOT(MetaCenterNet):
+class FairMOT(GenericLightning):
     def __init__(
         *args,
         embedding_config: Dict[str, Any]
