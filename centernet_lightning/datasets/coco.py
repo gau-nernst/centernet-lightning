@@ -6,8 +6,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from pycocotools.coco import COCO
 from PIL import Image
+
+from . import transforms
+
+_transforms = {**A.__dict__, **transforms.__dict__}
 
 
 def _clip_box(xywh_box, img_w, img_h):
@@ -89,7 +94,20 @@ class CocoDetection(Dataset):
         return len(self.img_names)
 
 
-def collate_fn(batch):
+def coco_detection_collate_fn(batch):
     images = torch.stack([x[0] for x in batch], dim=0)
     targets = tuple(x[1] for x in batch)
     return images, targets
+
+
+def parse_albumentations_transforms(transforms, box_params=None):
+    ts = []
+    for t in transforms:
+        t_fn = _transforms[t['name']]
+        init_args = t['init_args'] if 'init_args' in t else {}
+        ts.append(t_fn(**init_args))
+    ts.append(ToTensorV2())
+    
+    if box_params is None:
+        box_params = {'format': 'coco', 'label_fields': ['labels'], 'min_area': 1}
+    return A.Compose(ts, bbox_params=box_params)

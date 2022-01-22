@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Union
+from typing import Dict, List, Union
 from functools import partial
 
 import torch
@@ -10,6 +10,7 @@ from vision_toolbox.backbones import BaseBackbone
 from vision_toolbox.necks import BaseNeck
 from vision_toolbox.components import ConvBnAct
 
+
 _optimizers = {
     "SGD": partial(torch.optim.SGD, momentum=0.9),
     "Adam": torch.optim.Adam,
@@ -17,9 +18,7 @@ _optimizers = {
     "RMSprop": partial(torch.optim.RMSprop, momentum=0.9)
 }
 
-# Reference implementations
-# https://github.com/tensorflow/models/blob/master/research/object_detection/meta_architectures/center_net_meta_arch.py     num_filters = 256
-# https://github.com/lbin/CenterNet-better-plus/blob/master/centernet/centernet_head.py                                     num_filters = in_channels
+
 class GenericHead(nn.Sequential):
     def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=1, block=ConvBnAct, init_bias: float=None):
         super().__init__()
@@ -33,7 +32,7 @@ class GenericHead(nn.Sequential):
 
 
 class GenericModel(nn.Module):
-    def __init__(self, backbone: BaseBackbone, neck: BaseNeck, heads: nn.Module, extra_block=None):
+    def __init__(self, backbone: BaseBackbone, neck: BaseNeck, heads: nn.Module, extra_block: nn.Module=None):
         super().__init__()
         self.backbone = backbone
         self.neck = neck
@@ -67,6 +66,7 @@ class GenericLightning(pl.LightningModule):
         warmup_epochs: int=5,
         warmup_decay: float=0.01
     ):
+        # self.save_hyperparameters(jit, optimizer, lr, weight_decay, norm_weight_decay, warmup_epochs, warmup_decay)
         super().__init__()
         self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
         if jit:
@@ -94,12 +94,11 @@ class GenericLightning(pl.LightningModule):
         return self.get_dataloader(train=False)
 
     def configure_optimizers(self):
-        if self.hparams.norm_weight_decay is not None:      # norm's weight decay = 0
-            # https://github.com/pytorch/vision/blob/main/torchvision/ops/_utils.py
+        # norm's weight decay = 0
+        # https://github.com/pytorch/vision/blob/main/torchvision/ops/_utils.py
+        if self.hparams.norm_weight_decay is not None:
             norm_classes = (nn.modules.batchnorm._BatchNorm, nn.LayerNorm, nn.GroupNorm)
-            
-            norm_params = []
-            other_params = []
+            norm_params, other_params = [], []
             for module in self.modules():
                 if next(module.children(), None):
                     other_params.extend(p for p in module.parameters(recurse=False) if p.requires_grad)
@@ -116,14 +115,12 @@ class GenericLightning(pl.LightningModule):
             parameters = self.parameters()
 
         optimizer = _optimizers[self.hparams.optimizer](parameters, lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        
         lr_scheduler = CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs-self.hparams.warmup_epochs)
         if self.hparams.warmup_epochs > 0:
             warmup_scheduler = LinearLR(optimizer, start_factor=self.hparams.warmup_decay, total_iters=self.hparams.warmup_epochs)
             lr_scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[self.hparams.warmup_epochs])
             
-            # https://github.com/pytorch/pytorch/issues/67318
-            if not hasattr(lr_scheduler, "optimizer"):
+            if not hasattr(lr_scheduler, "optimizer"):      # https://github.com/pytorch/pytorch/issues/67318
                 setattr(lr_scheduler, "optimizer", optimizer)
 
         return {

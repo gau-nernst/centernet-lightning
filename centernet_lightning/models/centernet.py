@@ -1,6 +1,6 @@
-from copy import deepcopy
-from typing import Any, Callable, List, Dict, Tuple, Union
+from typing import Any, Callable, Dict, Tuple
 import math
+import itertools
 
 import numpy as np
 import torch
@@ -8,19 +8,14 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from torchvision.ops import box_convert
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+
 from vision_toolbox import backbones, necks
 from vision_toolbox.components import ConvBnAct
 
 from .meta import GenericHead, GenericLightning
 from ..losses import heatmap_losses, box_losses
-from ..datasets.coco import CocoDetection, collate_fn
-from ..datasets import transforms
+from ..datasets.coco import CocoDetection, coco_detection_collate_fn, parse_albumentations_transforms
 from ..eval.coco import CocoEvaluator
-
-
-_transforms = {**A.__dict__, **transforms.__dict__}
 
 
 class _FixedRadius:
@@ -90,12 +85,14 @@ class CenterNet(GenericLightning):
         box_init_bias: float=None,
 
         # box params
+        box_loss: str="L1Loss",
+        box_loss_weight: float=0.1,
         box_log: bool=False,
         box_multiplier: float=1.,
-        box_loss: str="L1Loss",
-
+        
         # heatmap params
         heatmap_loss: str="CornerNetFocalLoss",
+        heatmap_loss_weight: float=1.,
         heatmap_target: str="cornernet",
         heatmap_target_params: Dict[str, float]=None,
         
@@ -129,67 +126,52 @@ class CenterNet(GenericLightning):
         self.evaluator = CocoEvaluator(num_classes)
 
         self.heatmap_loss = heatmap_losses.__dict__[heatmap_loss]()
+        self.box_loss = box_losses.__dict__[box_loss](reduction='sum')
         if heatmap_target_params is None:
             heatmap_target_params = {}
         self.heatmap_radius = _heatmap_targets[heatmap_target](**heatmap_target_params)
         
-        self.box_loss = box_losses.__dict__[box_loss](reduction='sum')
-        self.box_log = box_log
-        self.box_multiplier = box_multiplier
-
-        self.nms_kernel = nms_kernel
-        self.num_detections = num_detections
-    
     def compute_loss(self, outputs, targets):
         heatmap = outputs["heatmap"]
         box_offsets = outputs["box_2d"]
         out_h, out_w = heatmap.shape[-2:]
+        dtype = heatmap.dtype
+        device = self.device
 
         num_dets = 0
         num_boxes = 0
         target_heatmap = torch.zeros_like(heatmap)
-        box_loss = torch.tensor(0., dtype=heatmap.dtype, device=heatmap.dtype)
+        box_loss = torch.tensor(0., dtype=dtype, device=device)
         for i, instances in enumerate(targets):
             if len(instances["labels"]) == 0:
                 continue
-            
+
+            boxes = np.array(instances['boxes']) / self.stride  # convert to feature map coordinates
+            centers = boxes[...,:2] + boxes[...,2:] / 2         # cx = x + w/2
+            centers = centers.round().astype(int)
+
             # heatmap
-            self.update_heatmap(target_heatmap[i,...], instances['boxes'], instances['labels'])
-            num_dets += len(instances['labels'])
+            radii = [self.heatmap_radius(w, h) for w, h in boxes[...,2:]]
+            self.update_heatmap(target_heatmap[i,...], centers, radii, instances['labels'])
+            num_dets += len(boxes)
 
-            # box
-            boxes = []
+            # box: 3x3 center sampling
+            box_samples = []
             indices = []
-            for box in instances["boxes"]:
-                x, y, w, h = [d/self.stride for d in box]       # convert to feature map coordinates
-                cx, cy = int(x + w/2), int(y + h/2)
-                cxs = [d for d in [cx-1, cx, cx+1] if d > 0 and d < out_w-1]
-                cys = [d for d in [cy-1, cy, cy+1] if d > 0 and d < out_h-1]
+            for box, (cx, cy) in zip(boxes, centers):
+                cxs = [d for d in [cx-1, cx, cx+1] if 0 <= d <= out_w-1]
+                cys = [d for d in [cy-1, cy, cy+1] if 0 <= d <= out_h-1]
 
-                for cx in cxs:
-                    for cy in cys:
-                        boxes.append(box)       # xywh
-                        indices.append(cy * out_w + cx)
+                new_centers = itertools.product(cxs, cys)
+                for cx, cy in new_centers:
+                    indices.append(cy*out_w + cx)
+                    box_samples.append(box)             # use the same box
+                    num_boxes += 1
 
-            target_boxes = box_convert(torch.tensor(boxes), "xywh", "xyxy").to(box_offsets.device)
-            pred_boxes = self.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices).to(box_offsets.device))
-            box_loss += self.box_loss(pred_boxes, target_boxes)
-            num_boxes += len(boxes)
-
-            # # 1. convert target boxes to xyxy and get center points
-            # img_boxes = box_convert(torch.tensor(instances["boxes"]), "xywh", "xyxy")
-            # cx = (img_boxes[...,0] + img_boxes[...,2]) / 2 / self.stride        # center points in output feature map coordinates
-            # cy = (img_boxes[...,1] + img_boxes[...,3]) / 2 / self.stride
-
-            # # 2. gather training samples. only center point
-            # # TODO: 3x3 square
-            # # method: permutate, get (cx-1, cx, cx+1) x (cy-1, cy, cy+1)
-            # indices = cy.long() * out_w + cx.long()
-            # pred_boxes = Box2DHead.gather_and_decode_boxes(box_offsets[i], indices.to(box_offsets.device), stride=self.stride, **self.box_params)
-
-            # # 3. apply loss
-            # loss += self.loss_function(pred_boxes, img_boxes.to(box_offsets.device))
-            # num_dets += len(instances["boxes"])
+            box_samples = torch.from_numpy(np.stack(box_samples, axis=0)) * self.stride
+            box_samples = box_convert(box_samples, "xywh", "xyxy").to(device)
+            pred_boxes = self.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices, device=device))
+            box_loss += self.box_loss(pred_boxes, box_samples)
 
         heatmap_loss = self.heatmap_loss(heatmap, target_heatmap) / max(1, num_dets)
         box_loss = box_loss / max(1, num_boxes)
@@ -197,45 +179,33 @@ class CenterNet(GenericLightning):
         return {
             "heatmap": heatmap_loss,
             "box_2d": box_loss,
-            "total": heatmap_loss + box_loss
+            "total": heatmap_loss*self.hparams.heatmap_loss_weight + box_loss*self.hparams.box_loss_weight
         }
-
 
     # TODO: make this torchscript-able
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/coco.py
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/utils.py
-    def update_heatmap(self, heatmap: torch.Tensor, boxes: Tuple[Tuple[int]], labels: Tuple[int]):
-        """Render target heatmap for a batch of images
-        """
+    @staticmethod
+    def update_heatmap(heatmap: torch.Tensor, centers: np.ndarray, radii: np.ndarray, labels: Tuple[int]):
         out_h, out_w = heatmap.shape[-2:]
-        for box, label in zip(boxes, labels):
-            # scale up to heatmap dimensions
-            x, y, w, h = [i / self.stride for i in box]
-            cx = round(x + w/2)
-            cy = round(y + h/2)
-            
-            r_x, r_y = self.heatmap_radius(w, h)
+        for (cx, cy), (rx, ry), label in zip(centers, radii, labels):
             # TODO: check CenterNet, mmdet implementation, and CenterNet2
-            r_x = max(0, round(r_x))
-            r_y = max(0, round(r_y))
-            std_x = r_x / 3 + 1/6
-            std_y = r_y / 3 + 1/6
+            rx, ry = max(0, round(rx)), max(0, round(ry))
+            std_x, std_y = rx/3 + 1/6, ry/3 + 1/6
             
-            l = min(cx, r_x)
-            t = min(cy, r_y)
-            r = min(out_w - cx, r_x+1)
-            b = min(out_h - cy, r_y+1)
+            l, t = min(cx, rx), min(cy, ry)
+            r, b = min(out_w - cx, rx+1), min(out_h - cy, ry+1)
 
             # only gaussian and heatmap are on gpu
-            grid_y = torch.arange(-r_y, r_y+1, device=heatmap.device).view(-1,1)
-            grid_x = torch.arange(-r_x, r_x+1, device=heatmap.device).view(1,-1)
+            grid_y = torch.arange(-ry, ry+1, device=heatmap.device).view(-1,1)
+            grid_x = torch.arange(-rx, rx+1, device=heatmap.device).view(1,-1)
 
-            gaussian = grid_x.square() / (2 * std_x * std_x) + grid_y.square() / (2 * std_y * std_y)
+            gaussian = grid_x.square() / (2 * std_x**2) + grid_y.square() / (2 * std_y**2)
             gaussian = torch.exp(-gaussian)
             gaussian[gaussian < torch.finfo(gaussian.dtype).eps * torch.max(gaussian)] = 0
 
             masked_heatmap = heatmap[label, cy-t:cy+b, cx-l:cx+r]
-            masked_gaussian = gaussian[r_y-t:r_y+b, r_x-l:r_x+r]
+            masked_gaussian = gaussian[ry-t:ry+b, rx-l:rx+r]
             torch.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
 
     def validation_step(self, batch, batch_idx):
@@ -260,33 +230,18 @@ class CenterNet(GenericLightning):
  
     def get_dataloader(self, train=True):
         config = self.hparams.train_data if train else self.hparams.val_data
-
-        ts = []
-        for t in config["transforms"]:
-            t_fn = _transforms[t["name"]]
-            init_args = t["init_args"] if "init_args" in t else {}
-            ts.append(t_fn(**init_args))
-        ts.append(ToTensorV2())
-        
-        transforms = A.Compose(ts, bbox_params=dict(format="coco", label_fields=["labels"], min_area=1))
-        ds = CocoDetection(config["img_dir"], config["ann_json"], transforms=transforms)
+        transforms = parse_albumentations_transforms(config['transforms'])
+        ds = CocoDetection(config['img_dir'], config['ann_json'], transforms=transforms)
 
         return DataLoader(
             ds, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers,
-            shuffle=train, collate_fn=collate_fn, pin_memory=True
+            shuffle=train, collate_fn=coco_detection_collate_fn, pin_memory=True
         )
 
     def decode_detections(self, heatmap: torch.Tensor, box_offsets: torch.Tensor, normalize_boxes: bool=False) -> Dict[str, torch.Tensor]:
-        """Decode model outputs for detection task
-
-        Args:
-            heatmap: heatmap output
-            box_offsets: box_2d output
-            normalize_bbox: whether to normalize bbox coordinates to [0,1]. Otherwise bbox coordinates are in input image coordinates. Default is False
-        
-        Returns: a Dict with keys boxes, scores, labels
+        """Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels
         """
-        scores, indices, labels = self.get_topk_from_heatmap(heatmap, k=self.num_detections)
+        scores, indices, labels = self.get_topk_from_heatmap(heatmap)
         boxes = self.gather_and_decode_boxes(box_offsets, indices, normalize_boxes=normalize_boxes)
         return {
             "boxes": boxes,
@@ -295,19 +250,14 @@ class CenterNet(GenericLightning):
         }
 
     def get_topk_from_heatmap(self, heatmap: torch.Tensor):
-        """Gather top k detections from heatmap
-
-        Args:
-            heatmap: (N, num_classes, H, W) or (num_classes, H, W)
-        
-        Returns:
-            scores, indices, labels: (N, k) or (k,)
+        """Gather top k detections from heatmap. Batch dim is optional. Returns: scores, indices, labels with dim (N, k)
         """
         batch_size = heatmap.shape[0]
+        nms_kernel = self.hparams.nms_kernel
 
         # 1. pseudo-nms via max pool
-        padding = (self.nms_kernel - 1) // 2
-        nms_mask = F.max_pool2d(heatmap, kernel_size=self.nms_kernel, stride=1, padding=padding) == heatmap
+        padding = (nms_kernel - 1) // 2
+        nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
         heatmap = heatmap * nms_mask
         
         # 2. since box regression is shared, we only consider the best candidate at each heatmap location
@@ -316,20 +266,20 @@ class CenterNet(GenericLightning):
         # 3. flatten and get topk
         heatmap = heatmap.view(batch_size, -1)
         labels = labels.view(batch_size, -1)
-        scores, indices = torch.topk(heatmap, self.num_detections)
+        scores, indices = torch.topk(heatmap, self.hparams.num_detections)
         labels = torch.gather(labels, dim=-1, index=indices)
     
         return scores, indices, labels
 
     def gather_and_decode_boxes(self, box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False) -> torch.Tensor:
-        """Gather 2D bounding boxes at given indices
+        """Gather 2D bounding boxes at given indices.
 
         Args:
-            box_offsets: (N, 4, H, W) or (4, H, W)
-            indices: (N, num_dets) or (num_dets,)
+            box_offsets: (N, 4, H, W)
+            indices: (N, num_dets)
 
         Returns:
-            boxes: (N, num_dets, 4) or (num_dets, 4)
+            boxes: (N, num_dets, 4)
         """
         out_h, out_w = box_offsets.shape[-2:]
         cx = indices % out_w + 0.5
@@ -337,16 +287,16 @@ class CenterNet(GenericLightning):
 
         # decoded = multiplier x exp(encoded)
         box_offsets = box_offsets.flatten(start_dim=-2)
-        if self.box_log:
+        if self.hparams.box_log:
             box_offsets = torch.exp(box_offsets)
-        box_offsets = box_offsets * self.box_multiplier     # *= will multiply inplace -> cannot call .backward()
+        box_offsets = box_offsets * self.hparams.box_multiplier     # *= will multiply inplace -> cannot call .backward()
         box_offsets = box_offsets.clamp_min(0)
 
         # boxes are in output feature maps coordinates
-        x1 = cx - torch.gather(box_offsets[...,0,:,:], dim=-1, index=indices)       # x1 = cx - left
-        y1 = cy - torch.gather(box_offsets[...,1,:,:], dim=-1, index=indices)       # y1 = cy - top
-        x2 = cx + torch.gather(box_offsets[...,2,:,:], dim=-1, index=indices)       # x2 = cx + right
-        y2 = cy + torch.gather(box_offsets[...,3,:,:], dim=-1, index=indices)       # y2 = cy + bottom
+        x1 = cx - torch.gather(box_offsets[...,0,:], dim=-1, index=indices)       # x1 = cx - left
+        y1 = cy - torch.gather(box_offsets[...,1,:], dim=-1, index=indices)       # y1 = cy - top
+        x2 = cx + torch.gather(box_offsets[...,2,:], dim=-1, index=indices)       # x2 = cx + right
+        y2 = cy + torch.gather(box_offsets[...,3,:], dim=-1, index=indices)       # y2 = cy + bottom
         boxes = torch.stack((x1, y1, x2, y2), dim=-1)
 
         if normalize_boxes:             # convert to normalized coordinates
