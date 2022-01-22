@@ -62,9 +62,9 @@ class _CornerNetRadius:
 
 
 _heatmap_targets = {
-    "fixed": _FixedRadius,
-    "ttfnet": _TTFNetRadius,
-    "cornernet": _CornerNetRadius
+    'fixed': _FixedRadius,
+    'ttfnet': _TTFNetRadius,
+    'cornernet': _CornerNetRadius
 }
 
 
@@ -74,7 +74,7 @@ class CenterNet(GenericLightning):
         num_classes: int,
         backbone: str,
         pretrained_backbone: bool=False,
-        neck: str="FPN",
+        neck: str='FPN',
         neck_config: Dict[str, Any]=None,
 
         # head configuration
@@ -85,15 +85,15 @@ class CenterNet(GenericLightning):
         box_init_bias: float=None,
 
         # box params
-        box_loss: str="L1Loss",
+        box_loss: str='L1Loss',
         box_loss_weight: float=0.1,
         box_log: bool=False,
         box_multiplier: float=1.,
         
         # heatmap params
-        heatmap_loss: str="CornerNetFocalLoss",
+        heatmap_loss: str='CornerNetFocalLoss',
         heatmap_loss_weight: float=1.,
-        heatmap_target: str="cornernet",
+        heatmap_target: str='cornernet',
         heatmap_target_params: Dict[str, float]=None,
         
         # inference config
@@ -117,33 +117,32 @@ class CenterNet(GenericLightning):
         head_in_c = neck.get_out_channels()
         heatmap_init_bias = math.log(heatmap_prior/(1-heatmap_prior))
         heads = nn.Module()
-        heads.add_module("heatmap", GenericHead(head_in_c, num_classes, width=head_width, depth=head_depth, block=head_block, init_bias=heatmap_init_bias))
-        heads.add_module("box_2d", GenericHead(head_in_c, 4, width=head_width, depth=head_depth, block=head_block, init_bias=box_init_bias))
+        heads.add_module('heatmap', GenericHead(head_in_c, num_classes, width=head_width, depth=head_depth, block=head_block, init_bias=heatmap_init_bias))
+        heads.add_module('box_2d', GenericHead(head_in_c, 4, width=head_width, depth=head_depth, block=head_block, init_bias=box_init_bias))
 
         super().__init__(backbone, neck, heads, **kwargs)
         self.num_classes = num_classes
         self.stride = backbone.stride // neck.stride
         self.evaluator = CocoEvaluator(num_classes)
 
-        self.heatmap_loss = heatmap_losses.__dict__[heatmap_loss]()
+        self.heatmap_loss = heatmap_losses.__dict__[heatmap_loss](reduction='sum')
         self.box_loss = box_losses.__dict__[box_loss](reduction='sum')
         if heatmap_target_params is None:
             heatmap_target_params = {}
         self.heatmap_radius = _heatmap_targets[heatmap_target](**heatmap_target_params)
         
     def compute_loss(self, outputs, targets):
-        heatmap = outputs["heatmap"]
-        box_offsets = outputs["box_2d"]
+        heatmap = outputs['heatmap']
+        box_offsets = outputs['box_2d']
         out_h, out_w = heatmap.shape[-2:]
         dtype = heatmap.dtype
         device = self.device
 
-        num_dets = 0
-        num_boxes = 0
+        num_dets = num_boxes = 0
         target_heatmap = torch.zeros_like(heatmap)
         box_loss = torch.tensor(0., dtype=dtype, device=device)
         for i, instances in enumerate(targets):
-            if len(instances["labels"]) == 0:
+            if len(instances['labels']) == 0:
                 continue
 
             boxes = np.array(instances['boxes']) / self.stride  # convert to feature map coordinates
@@ -152,37 +151,34 @@ class CenterNet(GenericLightning):
 
             # heatmap
             radii = [self.heatmap_radius(w, h) for w, h in boxes[...,2:]]
-            self.update_heatmap(target_heatmap[i,...], centers, radii, instances['labels'])
+            self.update_heatmap(target_heatmap[i], centers, radii, instances['labels'])
             num_dets += len(boxes)
 
             # box: 3x3 center sampling
-            box_samples = []
-            indices = []
-            for box, (cx, cy) in zip(boxes, centers):
+            box_samples, indices = [], []
+            for (x, y, w, h), (cx, cy) in zip(instances['boxes'], centers):
+                box = [x, y, x+w, y+h]
                 cxs = [d for d in [cx-1, cx, cx+1] if 0 <= d <= out_w-1]
                 cys = [d for d in [cy-1, cy, cy+1] if 0 <= d <= out_h-1]
 
                 new_centers = itertools.product(cxs, cys)
                 for cx, cy in new_centers:
                     indices.append(cy*out_w + cx)
-                    box_samples.append(box)             # use the same box
+                    box_samples.append(box)             # this is the original box, in input image scale
                     num_boxes += 1
 
-            box_samples = torch.from_numpy(np.stack(box_samples, axis=0)) * self.stride
-            box_samples = box_convert(box_samples, "xywh", "xyxy").to(device)
             pred_boxes = self.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices, device=device))
-            box_loss += self.box_loss(pred_boxes, box_samples)
+            box_loss += self.box_loss(pred_boxes, torch.tensor(box_samples, device=device))
 
         heatmap_loss = self.heatmap_loss(heatmap, target_heatmap) / max(1, num_dets)
         box_loss = box_loss / max(1, num_boxes)
 
         return {
-            "heatmap": heatmap_loss,
-            "box_2d": box_loss,
-            "total": heatmap_loss*self.hparams.heatmap_loss_weight + box_loss*self.hparams.box_loss_weight
+            'heatmap': heatmap_loss,
+            'box_2d': box_loss,
+            'total': heatmap_loss*self.hparams.heatmap_loss_weight + box_loss*self.hparams.box_loss_weight
         }
 
-    # TODO: make this torchscript-able
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/coco.py
     # https://github.com/princeton-vl/CornerNet/blob/master/sample/utils.py
     @staticmethod
@@ -213,11 +209,11 @@ class CenterNet(GenericLightning):
         outputs = self.model(images)
         preds = self.decode_detections(outputs['heatmap'], outputs['box_2d'])
         
-        preds["boxes"] = box_convert(preds["boxes"], "xyxy", "xywh")                    # coco box format
+        preds['boxes'] = box_convert(preds['boxes'], 'xyxy', 'xywh')                    # coco box format
         preds = {k: v.cpu().numpy() for k, v in preds.items()}                          # convert to numpy
         preds = [{k: v[i] for k, v in preds.items()} for i in range(images.shape[0])]   # convert to list of images
         
-        targets = [{k: np.array(target[k]) for k in ("boxes", "labels")} for target in targets]     # filter keys and convert to numpy array
+        targets = [{k: np.array(target[k]) for k in ('boxes', 'labels')} for target in targets]     # filter keys and convert to numpy array
         
         self.evaluator.update(preds, targets)
 
@@ -226,7 +222,7 @@ class CenterNet(GenericLightning):
         self.evaluator.reset()
 
         for k, v in metrics.items():
-            self.log(f"val/{k}", v)
+            self.log(f'val/{k}', v)
  
     def get_dataloader(self, train=True):
         config = self.hparams.train_data if train else self.hparams.val_data
@@ -239,19 +235,19 @@ class CenterNet(GenericLightning):
         )
 
     def decode_detections(self, heatmap: torch.Tensor, box_offsets: torch.Tensor, normalize_boxes: bool=False) -> Dict[str, torch.Tensor]:
-        """Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels
-        """
+        '''Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels
+        '''
         scores, indices, labels = self.get_topk_from_heatmap(heatmap)
         boxes = self.gather_and_decode_boxes(box_offsets, indices, normalize_boxes=normalize_boxes)
         return {
-            "boxes": boxes,
-            "scores": scores,
-            "labels": labels
+            'boxes': boxes,
+            'scores': scores,
+            'labels': labels
         }
 
     def get_topk_from_heatmap(self, heatmap: torch.Tensor):
-        """Gather top k detections from heatmap. Batch dim is optional. Returns: scores, indices, labels with dim (N, k)
-        """
+        '''Gather top k detections from heatmap. Batch dim is optional. Returns: scores, indices, labels with dim (N, k)
+        '''
         batch_size = heatmap.shape[0]
         nms_kernel = self.hparams.nms_kernel
 
@@ -272,7 +268,7 @@ class CenterNet(GenericLightning):
         return scores, indices, labels
 
     def gather_and_decode_boxes(self, box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False) -> torch.Tensor:
-        """Gather 2D bounding boxes at given indices.
+        '''Gather 2D bounding boxes at given indices.
 
         Args:
             box_offsets: (N, 4, H, W)
@@ -280,10 +276,10 @@ class CenterNet(GenericLightning):
 
         Returns:
             boxes: (N, num_dets, 4)
-        """
+        '''
         out_h, out_w = box_offsets.shape[-2:]
-        cx = indices % out_w + 0.5
-        cy = indices // out_w + 0.5
+        cx = torch.remainder(indices, out_w) + 0.5
+        cy = torch.div(indices, out_w, rounding_mode='floor') + 0.5
 
         # decoded = multiplier x exp(encoded)
         box_offsets = box_offsets.flatten(start_dim=-2)

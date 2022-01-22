@@ -66,7 +66,6 @@ class GenericLightning(pl.LightningModule):
         warmup_epochs: int=5,
         warmup_decay: float=0.01
     ):
-        # self.save_hyperparameters(jit, optimizer, lr, weight_decay, norm_weight_decay, warmup_epochs, warmup_decay)
         super().__init__()
         self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
         if jit:
@@ -77,6 +76,13 @@ class GenericLightning(pl.LightningModule):
 
     def get_dataloader(self, train=True):
         pass
+
+    def on_fit_start(self):
+        if self.trainer.is_global_zero:
+            length = max([len(name) for name, _ in self.model.named_children()]) + 1
+            for name, module in self.model.named_children():
+                num_params = sum([x.numel() for x in module.parameters()]) / 1e6
+                print(f'{name:{length}}: {num_params:.1f}M')
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
