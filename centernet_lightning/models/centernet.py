@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data.dataloader import DataLoader
+from torch.utils.data import DataLoader
 from torchvision.ops import box_convert
 
 from vision_toolbox import backbones, necks
@@ -207,20 +207,18 @@ class CenterNet(GenericLightning):
     def validation_step(self, batch, batch_idx):
         images, targets = batch
         outputs = self.model(images)
-        preds = self.decode_detections(outputs['heatmap'], outputs['box_2d'])
+        preds = self.decode_detections(outputs['heatmap'].sigmoid(), outputs['box_2d'])
         
         preds['boxes'] = box_convert(preds['boxes'], 'xyxy', 'xywh')                    # coco box format
         preds = {k: v.cpu().numpy() for k, v in preds.items()}                          # convert to numpy
         preds = [{k: v[i] for k, v in preds.items()} for i in range(images.shape[0])]   # convert to list of images
         
         targets = [{k: np.array(target[k]) for k in ('boxes', 'labels')} for target in targets]     # filter keys and convert to numpy array
-        
         self.evaluator.update(preds, targets)
 
     def validation_epoch_end(self, outputs):
         metrics = self.evaluator.get_metrics()
         self.evaluator.reset()
-
         for k, v in metrics.items():
             self.log(f'val/{k}', v)
  
@@ -228,7 +226,6 @@ class CenterNet(GenericLightning):
         config = self.hparams.train_data if train else self.hparams.val_data
         transforms = parse_albumentations_transforms(config['transforms'])
         ds = CocoDetection(config['img_dir'], config['ann_json'], transforms=transforms)
-
         return DataLoader(
             ds, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers,
             shuffle=train, collate_fn=coco_detection_collate_fn, pin_memory=True
@@ -255,16 +252,13 @@ class CenterNet(GenericLightning):
         padding = (nms_kernel - 1) // 2
         nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
         heatmap = heatmap * nms_mask
-        
-        # 2. since box regression is shared, we only consider the best candidate at each heatmap location
-        heatmap, labels = torch.max(heatmap, dim=1)
+        heatmap, labels = torch.max(heatmap, dim=1)         # get best candidate at each heatmap location, since box regression is shared
 
         # 3. flatten and get topk
         heatmap = heatmap.view(batch_size, -1)
         labels = labels.view(batch_size, -1)
         scores, indices = torch.topk(heatmap, self.hparams.num_detections)
         labels = torch.gather(labels, dim=-1, index=indices)
-    
         return scores, indices, labels
 
     def gather_and_decode_boxes(self, box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False) -> torch.Tensor:
@@ -289,6 +283,10 @@ class CenterNet(GenericLightning):
         box_offsets = box_offsets.clamp_min(0)
 
         # boxes are in output feature maps coordinates
+        # boxes = torch.stack((cx,cy,cx,cy), dim=-1)
+        # boxes[...,:2] -= torch.gather(box_offsets[...,:2,:], dim=-1, index=indices)
+        # boxes[...,2:] += torch.gather(box_offsets[...,2:,:], dim=-1, index=indices)
+
         x1 = cx - torch.gather(box_offsets[...,0,:], dim=-1, index=indices)       # x1 = cx - left
         y1 = cy - torch.gather(box_offsets[...,1,:], dim=-1, index=indices)       # y1 = cy - top
         x2 = cx + torch.gather(box_offsets[...,2,:], dim=-1, index=indices)       # x2 = cx + right
@@ -300,5 +298,4 @@ class CenterNet(GenericLightning):
             boxes[...,[1,3]] /= out_h
         else:
             boxes *= self.stride        # convert to input coordinates
-
         return boxes
