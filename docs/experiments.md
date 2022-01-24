@@ -23,10 +23,17 @@ No. | Backbone | Neck | Head | Heatmap | Box | Batch size | mAP | AP large | AP 
 ----|---------|------|------|---------|-----|------------|-----|----------|-----------|----------
 (1) | ResNet-34 (21.3M) | FPN (dim=128, 0.6M) | w=128, d=2 (0.6M) | radius=cornernet | multiplier=16, loss=L1, loss_weight=0.1 | 128 | 18.6 | 30.2 | 14.9 | 3.4
 (2) | VoVNet-39 (25.2M) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | ^ | multiplier=16, loss=GIoU, loss_weight=5 | 64 | 34.6 | 50.9 | 32.8 | 9.5
-(3) | ^ | ^ | ^ | ^ | ^ and 3x3 center sampling for box regression | ^ | 37.3 | 52.4 | 35.0 | 13.4
-(4) | ^ | ^ | ^ | radius=ttfnet | ^ | ^ | 37.2 | 52.1 | 34.9 | 13.2
-(5) | ^ | ^ | ^ | radius=cornernet | ^ but loss=CIoU | ^ | 37.4 | 52.6 | 35.4 | 13.1
-(6) | ResNet-34 (21.3M) | FPN (dim=256, 2.0M) | ^ | radius=cornernet | same as (3) | 128 | 32.7 | 48.1 | 29.8 | 9.5
+(3) | ^ | ^ | ^ | ^ | ^ and 3x3 center sampling for box regression | 128 | 37.3 | 52.4 | 35.0 | 13.4
+(4) | ResNet-34 (21.3M) | FPN (dim=256, 2.0M) | ^ | ^ | ^ | 128 | 32.7 | 48.1 | 29.8 | 9.5
+
+Fix Backbone = VoVNet-39 (25.2M)
+
+No. | Neck | Head | Heatmap | Box | Batch size | mAP | AP large | AP medium | AP small
+----|------|------|---------|-----|------------|-----|----------|-----------|----------
+(3) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | radius=cornernet | multiplier=16, loss=GIoU, loss_weight=5, 3x3 center sampling | 128 | 37.3 | 52.4 | 35.0 | 13.4
+(5) | (3) | (3) | radius=ttfnet | (3) | 128 | 37.2 | 52.1 | 34.9 | 13.2
+(6) | (3) | (3) | (3) | (3) but loss=CIoU | 128 | 37.4 | 52.6 | 35.4 | 13.1
+(7) | FPN (concat, dim=256, 4.2M) | (3) | (3) | (3) | 128 |
 
 ## August 2021
 
