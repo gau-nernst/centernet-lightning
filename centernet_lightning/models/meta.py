@@ -67,6 +67,7 @@ class GenericLightning(pl.LightningModule):
         warmup_decay: float=0.01
     ):
         super().__init__()
+        self.save_hyperparameters()
         self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
         if jit:
             self.model = torch.jit.script(self.model)

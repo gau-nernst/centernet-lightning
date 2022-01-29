@@ -1,12 +1,12 @@
 model:
   num_classes: 80
-  jit: true
-  backbone: vovnet39
+  backbone: cspdarknet53
   pretrained_backbone: True
 
   neck: FPN
   neck_config:
     out_channels: 256
+    fuse_fn: sum
 
   head_width: 256
   head_depth: 3
@@ -19,18 +19,19 @@ model:
   heatmap_loss_weight: 1
 
   # optimizer and scheduler
-  optimizer: AdamW
-  lr: 0.00025               # 5e-4 for batch size 128
-  weight_decay: 0.001
-  norm_weight_decay: 0
-  warmup_epochs: 5
-  warmup_decay: 0.01
+  optimizer_config:
+    jit: true
+    optimizer: AdamW
+    lr: 0.00025               # 5e-4 for batch size 128
+    weight_decay: 0.001
+    norm_weight_decay: 0
+    warmup_epochs: 5
+    warmup_decay: 0.01
 
   # data
-  batch_size: 32
-  num_workers: 4
-
   train_data:
+    batch_size: 32
+    num_workers: 4
     img_dir: ../datasets/COCO/images/train2017
     ann_json: ../datasets/COCO/annotations/instances_train2017.json
 
@@ -46,8 +47,13 @@ model:
           contrast: 0.4
           saturation: 0.4
       - name: Normalize
+        init_args:
+          mean: [0.5,0.5,0.5]
+          std: [0.5,0.5,0.5]
 
   val_data:
+    batch_size: 32
+    num_workers: 4
     img_dir: ../datasets/COCO/images/val2017
     ann_json: ../datasets/COCO/annotations/instances_val2017.json
  
@@ -57,6 +63,9 @@ model:
           height: 512
           width: 512
       - name: Normalize
+        init_args:
+          mean: [0.5,0.5,0.5]
+          std: [0.5,0.5,0.5]
 
 trainer:
   gpus: 2
@@ -66,11 +75,11 @@ trainer:
   sync_batchnorm: true
   max_epochs: 100
 
-  # logger:
-  #   - class_path: pytorch_lightning.loggers.WandbLogger
-  #     init_args:
-  #       project: centernet
-  #       log_model: true
+  logger:
+    - class_path: pytorch_lightning.loggers.WandbLogger
+      init_args:
+        project: centernet
+        log_model: true
 
   callbacks:
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor

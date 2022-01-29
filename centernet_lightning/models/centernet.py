@@ -101,26 +101,27 @@ class CenterNet(GenericLightning):
         num_detections: int=100,
 
         # data
-        batch_size: int=8,
-        num_workers: int=2,
         train_data: Dict[str, Any]=None,
         val_data: Dict[str, Any]=None,
 
-        **kwargs
+        optimizer_config: Dict[str, Any]=None
     ):
-        self.save_hyperparameters()
         if neck_config is None:
             neck_config = {}
-        backbone: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
-        neck: necks.BaseNeck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
+        backbone_m: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
+        neck_m: necks.BaseNeck = necks.__dict__[neck](backbone_m.get_out_channels(), **neck_config)
 
-        head_in_c = neck.get_out_channels()
+        head_in_c = neck_m.get_out_channels()
         heatmap_init_bias = math.log(heatmap_prior/(1-heatmap_prior))
         heads = nn.Module()
         heads.add_module('heatmap', GenericHead(head_in_c, num_classes, width=head_width, depth=head_depth, block=head_block, init_bias=heatmap_init_bias))
         heads.add_module('box_2d', GenericHead(head_in_c, 4, width=head_width, depth=head_depth, block=head_block, init_bias=box_init_bias))
 
-        super().__init__(backbone, neck, heads, **kwargs)
+        if optimizer_config is None:
+            optimizer_config = {} 
+        super().__init__(backbone_m, neck_m, heads, **optimizer_config)
+        self.save_hyperparameters(ignore='optimizer_config')
+        
         self.num_classes = num_classes
         self.stride = backbone.stride // neck.stride
         self.evaluator = CocoEvaluator(num_classes)
@@ -227,7 +228,7 @@ class CenterNet(GenericLightning):
         transforms = parse_albumentations_transforms(config['transforms'])
         ds = CocoDetection(config['img_dir'], config['ann_json'], transforms=transforms)
         return DataLoader(
-            ds, batch_size=self.hparams.batch_size, num_workers=self.hparams.num_workers,
+            ds, batch_size=config['batch_size'], num_workers=config['num_workers'],
             shuffle=train, collate_fn=coco_detection_collate_fn, pin_memory=True
         )
 

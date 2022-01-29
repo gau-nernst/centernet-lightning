@@ -25,6 +25,7 @@ No. | Backbone | Neck | Head | Heatmap | Box | Batch size | mAP | AP large | AP 
 (2) | VoVNet-39 (25.2M) | FPN (dim=256, 2.4M) | w=256, d=3 (3.6M) | ^ | multiplier=16, loss=GIoU, loss_weight=5 | 64 | 34.6 | 50.9 | 32.8 | 9.5
 (3) | ^ | ^ | ^ | ^ | ^ and 3x3 center sampling for box regression | 64 | 37.3 | 52.4 | 35.0 | 13.4
 (4) | ResNet-34 (21.3M) | FPN (dim=256, 2.0M) | ^ | ^ | ^ | 128 | 32.7 | 48.1 | 29.8 | 9.5
+(5) | CSPDarknet-53 (26.3M) | FPN (dim=256, 2.3M) | ^ | ^ | ^ | 64
 
 Fix Backbone = VoVNet-39 (25.2M)
 
