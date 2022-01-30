@@ -1,4 +1,4 @@
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Any
 from functools import partial
 
 import torch
@@ -6,8 +6,7 @@ from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pytorch_lightning as pl
 
-from vision_toolbox.backbones import BaseBackbone
-from vision_toolbox.necks import BaseNeck
+from vision_toolbox import backbones, necks
 from vision_toolbox.components import ConvBnAct
 
 
@@ -20,7 +19,7 @@ _optimizers = {
 
 
 class GenericHead(nn.Sequential):
-    def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=1, block=ConvBnAct, init_bias: float=None):
+    def __init__(self, in_channels: int, out_channels: int, width: int=256, depth: int=3, block=ConvBnAct, init_bias: float=None):
         super().__init__()
         for i in range(depth):
             in_c = in_channels if i == 0 else width
@@ -32,7 +31,7 @@ class GenericHead(nn.Sequential):
 
 
 class GenericModel(nn.Module):
-    def __init__(self, backbone: BaseBackbone, neck: BaseNeck, heads: nn.Module, extra_block: nn.Module=None):
+    def __init__(self, backbone: backbones.BaseBackbone, neck: necks.BaseNeck, heads: nn.Module, extra_block: nn.Module=None):
         super().__init__()
         self.backbone = backbone
         self.neck = neck
@@ -41,10 +40,18 @@ class GenericModel(nn.Module):
     
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         out = self.backbone.forward_features(x)
-        out = self.neck(out)
         if self.extra_block is not None:        # e.g. SPP
-            out = self.extra_block(out)
+            out[-1] = self.extra_block(out[-1])
+        out = self.neck(out)
         out = {name: head(out) for name, head in self.heads.named_children()}
+        return out
+
+    def multilevel_forward(self, x: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+        out = self.backbone.forward_features(x)
+        if self.extra_block is not None:        # e.g. SPP
+            out[-1] = self.extra_block(out[-1])
+        out = self.neck.forward_features(out)
+        out = [{name: head(x) for name, head in self.heads.named_children()} for x in out]
         return out
 
 
@@ -52,9 +59,12 @@ class GenericLightning(pl.LightningModule):
     def __init__(
         self,
         # model
-        backbone: BaseBackbone,
-        neck: BaseNeck,
-        heads: nn.Module,
+        backbone: str,
+        pretrained_backbone: bool,
+        neck: str,
+        heads: Dict[str, Dict[str, Any]],
+        neck_config: Dict[str, Any]=None,
+        head_config: Dict[str, Any]=None,
         extra_block: nn.Module=None,
         jit: bool=False,
 
@@ -68,7 +78,21 @@ class GenericLightning(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = GenericModel(backbone, neck, heads, extra_block=extra_block)
+        if neck_config is None:
+            neck_config = {}
+        if head_config is None:
+            head_config = {}
+        
+        backbone: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
+        neck: necks.BaseNeck = necks.__dict__[neck](backbone.get_out_channels(), **neck_config)
+
+        head_in_c = neck.get_out_channels()
+        head_modules = nn.Module()
+        for name, config in heads.items():
+            head_modules.add_module(name, GenericHead(head_in_c, **config, **head_config))
+        
+        self.model = GenericModel(backbone, neck, head_modules, extra_block=extra_block)
+        self.stride = backbone.stride // neck.stride
         if jit:
             self.model = torch.jit.script(self.model)
 

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Dict, Tuple
 import math
 import itertools
 
@@ -7,10 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision.ops import box_convert
-
-from vision_toolbox import backbones, necks
-from vision_toolbox.components import ConvBnAct
+from torchvision.ops import box_convert, batched_nms
 
 from .meta import GenericHead, GenericLightning
 from ..losses import heatmap_losses, box_losses
@@ -76,21 +73,17 @@ class CenterNet(GenericLightning):
         pretrained_backbone: bool=False,
         neck: str='FPN',
         neck_config: Dict[str, Any]=None,
-
-        # head configuration
-        head_width: int=256,
-        head_depth: int=3,
-        head_block: Callable=ConvBnAct,
-        heatmap_prior: float=0.01,
-        box_init_bias: float=None,
+        head_config: Dict[str, Any]=None,
 
         # box params
+        box_init_bias: float=None,
         box_loss: str='L1Loss',
         box_loss_weight: float=0.1,
         box_log: bool=False,
         box_multiplier: float=1.,
         
         # heatmap params
+        heatmap_prior: float=0.01,
         heatmap_loss: str='CornerNetFocalLoss',
         heatmap_loss_weight: float=1.,
         heatmap_target: str='cornernet',
@@ -106,24 +99,19 @@ class CenterNet(GenericLightning):
 
         optimizer_config: Dict[str, Any]=None
     ):
-        if neck_config is None:
-            neck_config = {}
-        backbone_m: backbones.BaseBackbone = backbones.__dict__[backbone](pretrained=pretrained_backbone)
-        neck_m: necks.BaseNeck = necks.__dict__[neck](backbone_m.get_out_channels(), **neck_config)
-
-        head_in_c = neck_m.get_out_channels()
-        heatmap_init_bias = math.log(heatmap_prior/(1-heatmap_prior))
-        heads = nn.Module()
-        heads.add_module('heatmap', GenericHead(head_in_c, num_classes, width=head_width, depth=head_depth, block=head_block, init_bias=heatmap_init_bias))
-        heads.add_module('box_2d', GenericHead(head_in_c, 4, width=head_width, depth=head_depth, block=head_block, init_bias=box_init_bias))
-
+        heads = {
+            'heatmap': {'out_channels': num_classes, 'init_bias': math.log(heatmap_prior/(1-heatmap_prior))},
+            'box_2d': {'out_channels': 4, 'init_bias': box_init_bias}
+        }
         if optimizer_config is None:
             optimizer_config = {} 
-        super().__init__(backbone_m, neck_m, heads, **optimizer_config)
+        super().__init__(
+            backbone, pretrained_backbone, neck, heads,
+            neck_config=neck_config, head_config=head_config, **optimizer_config
+        )
         self.save_hyperparameters(ignore='optimizer_config')
-        
+
         self.num_classes = num_classes
-        self.stride = backbone.stride // neck.stride
         self.evaluator = CocoEvaluator(num_classes)
 
         self.heatmap_loss = heatmap_losses.__dict__[heatmap_loss](reduction='sum')
@@ -243,16 +231,17 @@ class CenterNet(GenericLightning):
             'labels': labels
         }
 
-    def get_topk_from_heatmap(self, heatmap: torch.Tensor):
+    def get_topk_from_heatmap(self, heatmap: torch.Tensor, pseudo_nms: bool=True):
         '''Gather top k detections from heatmap. Batch dim is optional. Returns: scores, indices, labels with dim (N, k)
         '''
         batch_size = heatmap.shape[0]
         nms_kernel = self.hparams.nms_kernel
 
         # 1. pseudo-nms via max pool
-        padding = (nms_kernel - 1) // 2
-        nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
-        heatmap = heatmap * nms_mask
+        if pseudo_nms:
+            padding = (nms_kernel - 1) // 2
+            nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
+            heatmap = heatmap * nms_mask
         heatmap, labels = torch.max(heatmap, dim=1)         # get best candidate at each heatmap location, since box regression is shared
 
         # 3. flatten and get topk

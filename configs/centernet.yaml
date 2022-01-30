@@ -8,14 +8,15 @@ model:
     out_channels: 256
     fuse_fn: sum
 
-  head_width: 256
-  head_depth: 3
-  heatmap_prior: 0.01
+  head_config:
+    width: 256
+    depth: 3
 
   box_loss: GIoULoss
   box_multiplier: 16
   box_loss_weight: 5
 
+  heatmap_prior: 0.01
   heatmap_loss_weight: 1
 
   # optimizer and scheduler
