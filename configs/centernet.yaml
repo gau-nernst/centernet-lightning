@@ -37,11 +37,18 @@ model:
     ann_json: ../datasets/COCO/annotations/instances_train2017.json
 
     transforms:
-      - name: HorizontalFlip
-      - name: RandomResizedCrop
+      # - name: RandomResizedCrop
+      #   init_args:
+      #     height: 512
+      #     width: 512
+      - name: SmallestMaxSize
         init_args:
-          height: 512
-          width: 512
+          max_size: &img_size 512
+      - name: RandomCrop
+        init_args:
+          height: *img_size
+          width: *img_size
+      - name: HorizontalFlip
       - name: ColorJitter
         init_args:
           brightness: 0.4
@@ -53,16 +60,25 @@ model:
           std: [0.5,0.5,0.5]
 
   val_data:
-    batch_size: 32
+    batch_size: 1
     num_workers: 4
     img_dir: ../datasets/COCO/images/val2017
     ann_json: ../datasets/COCO/annotations/instances_val2017.json
  
     transforms:
-      - name: Resize
+      # - name: Resize
+      #   init_args:
+      #     height: 512
+      #     width: 512
+      - name: SmallestMaxSize
         init_args:
-          height: 512
-          width: 512
+          max_size: *img_size
+      - name: PadIfNeeded
+        init_args:
+          min_height: null
+          min_width: null
+          pad_height_divisor: 32
+          pad_width_divisor: 32
       - name: Normalize
         init_args:
           mean: [0.5,0.5,0.5]
