@@ -120,7 +120,10 @@ class CenterNet(GenericLightning):
             heatmap_target_params = {}
         self.heatmap_radius = _heatmap_targets[heatmap_target](**heatmap_target_params)
         
-    def compute_loss(self, outputs, targets):
+    def compute_loss(self, outputs, targets, stride=None):
+        if stride is None:
+            stride = self.stride
+        
         heatmap = outputs['heatmap']
         box_offsets = outputs['box_2d']
         out_h, out_w = heatmap.shape[-2:]
@@ -134,13 +137,13 @@ class CenterNet(GenericLightning):
             if len(instances['labels']) == 0:
                 continue
 
-            boxes = np.array(instances['boxes']) / self.stride  # convert to feature map coordinates
+            boxes = np.array(instances['boxes']) / stride       # convert to feature map coordinates
             centers = boxes[...,:2] + boxes[...,2:] / 2         # cx = x + w/2
             centers = centers.round().astype(int)
 
             # heatmap
             radii = [self.heatmap_radius(w, h) for w, h in boxes[...,2:]]
-            self.update_heatmap(target_heatmap[i], centers, radii, instances['labels'])
+            CenterNet.update_heatmap(target_heatmap[i], centers, radii, instances['labels'])
             num_dets += len(boxes)
 
             # box: 3x3 center sampling
@@ -156,7 +159,10 @@ class CenterNet(GenericLightning):
                     box_samples.append(box)             # this is the original box, in input image scale
                     num_boxes += 1
 
-            pred_boxes = self.gather_and_decode_boxes(box_offsets[i], torch.tensor(indices, device=device))
+            pred_boxes = CenterNet.gather_and_decode_boxes(
+                box_offsets[i], torch.tensor(indices, device=device),
+                box_log=self.hparams.box_log, box_multiplier=self.hparams.box_multiplier, stride=stride
+            )
             box_loss += self.box_loss(pred_boxes, torch.tensor(box_samples, device=device))
 
         heatmap_loss = self.heatmap_loss(heatmap, target_heatmap) / max(1, num_dets)
@@ -224,7 +230,10 @@ class CenterNet(GenericLightning):
         '''Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels
         '''
         scores, indices, labels = self.get_topk_from_heatmap(heatmap)
-        boxes = self.gather_and_decode_boxes(box_offsets, indices, normalize_boxes=normalize_boxes)
+        boxes = CenterNet.gather_and_decode_boxes(
+            box_offsets, indices, normalize_boxes=normalize_boxes,
+            box_log=self.hparams.box_log, box_multiplier=self.hparams.box_multiplier, stride=self.stride
+        )
         return {
             'boxes': boxes,
             'scores': scores,
@@ -251,7 +260,11 @@ class CenterNet(GenericLightning):
         labels = torch.gather(labels, dim=-1, index=indices)
         return scores, indices, labels
 
-    def gather_and_decode_boxes(self, box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False) -> torch.Tensor:
+    @staticmethod
+    def gather_and_decode_boxes(
+        box_offsets: torch.Tensor, indices: torch.Tensor, normalize_boxes: bool=False,
+        box_log: bool=False, box_multiplier: float=1., stride: int=4
+    ) -> torch.Tensor:
         '''Gather 2D bounding boxes at given indices.
 
         Args:
@@ -267,9 +280,9 @@ class CenterNet(GenericLightning):
 
         # decoded = multiplier x exp(encoded)
         box_offsets = box_offsets.flatten(start_dim=-2)
-        if self.hparams.box_log:
+        if box_log:
             box_offsets = torch.exp(box_offsets)
-        box_offsets = box_offsets * self.hparams.box_multiplier     # *= will multiply inplace -> cannot call .backward()
+        box_offsets = box_offsets * box_multiplier     # *= will multiply inplace -> cannot call .backward()
         box_offsets = box_offsets.clamp_min(0)
 
         # boxes are in output feature maps coordinates
@@ -287,5 +300,5 @@ class CenterNet(GenericLightning):
             boxes[...,[0,2]] /= out_w
             boxes[...,[1,3]] /= out_h
         else:
-            boxes *= self.stride        # convert to input coordinates
+            boxes *= stride        # convert to input coordinates
         return boxes

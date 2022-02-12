@@ -66,6 +66,7 @@ class GenericLightning(pl.LightningModule):
         neck_config: Dict[str, Any]=None,
         head_config: Dict[str, Any]=None,
         extra_block: nn.Module=None,
+        channels_last: bool=False,
         jit: bool=False,
 
         # optimizer and scheduler
@@ -93,6 +94,8 @@ class GenericLightning(pl.LightningModule):
         
         self.model = GenericModel(backbone, neck, head_modules, extra_block=extra_block)
         self.stride = backbone.stride // neck.stride
+        if channels_last:
+            self.model = self.model.to(memory_format=torch.channels_last)
         if jit:
             self.model = torch.jit.script(self.model)
 
@@ -111,6 +114,9 @@ class GenericLightning(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, targets = batch
+        if self.hparams.channels_last:
+            images = images.to(memory_format=torch.channels_last)
+            
         outputs = self.model(images)
         losses = self.compute_loss(outputs, targets)
         for k, v in losses.items():
