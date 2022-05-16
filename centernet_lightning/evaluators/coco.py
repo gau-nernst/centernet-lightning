@@ -1,13 +1,46 @@
 import contextlib
-from typing import List, Dict
+from collections import namedtuple
+from typing import List, Optional, TypedDict, TypeVar, Union
 
-import torch.distributed as dist
 import numpy as np
+import torch.distributed as dist
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
+T = TypeVar("T")
 
-def gather_and_merge(data: list):
+
+class _PredictedDetection(TypedDict):
+    boxes: np.ndarray
+    scores: np.ndarray
+    labels: np.ndarray
+
+
+class _GroundTruthDetection(TypedDict):
+    boxes: np.ndarray
+    labels: np.ndarray
+
+
+CocoMetrics = namedtuple(
+    "CocoMetrics",
+    [
+        "mAP",
+        "AP50",
+        "AP75",
+        "AP_small",
+        "AP_medium",
+        "AP_large",
+        "AR1",
+        "AR10",
+        "mAR",
+        "AR_small",
+        "AR_medium",
+        "AR_large",
+    ],
+)
+
+
+def gather_and_merge_list(data: List[T]) -> List[T]:
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     if world_size == 1:
         return data
@@ -19,12 +52,6 @@ def gather_and_merge(data: list):
 
 
 class CocoEvaluator:
-    pred_keys = ("boxes", "scores", "labels")
-    target_keys = ("boxes", "labels")
-    metric_names = (
-        "mAP", "AP50", "AP75", "AP_small", "AP_medium", "AP_large",
-        "AR1", "AR10", "mAR", "AR_small", "AR_medium", "AR_large"
-    )
     # sample
     # Average Precision (AP) @[ IoU=0.50:0.95 | area= all | maxDets=100 ] = 0.000
     # Average Precision (AP) @[ IoU=0.50 | area= all | maxDets=100 ] = 0.000
@@ -38,72 +65,96 @@ class CocoEvaluator:
     # Average Recall (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.000
     # Average Recall (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.000
     # Average Recall (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.000
-
-    def __init__(self, num_classes):
-        self.num_classes = num_classes
+    def __init__(self):
         self.reset()
 
-    def update(self, preds: List[Dict[str, np.ndarray]], targets: List[Dict[str, np.ndarray]]):
+    def update(
+        self,
+        predictions: List[_PredictedDetection],
+        targets: List[_GroundTruthDetection],
+    ):
         """
         Args:
-            preds: a list, each is a dict corresponds to 1 image. Keys: boxes (xywh), scores, labels
-            targets: a list, each is a dict corresponds to 1 image. Keys: boxes (xywhh), labels
+            predictions: a list, each is a dict corresponds to 1 image. Keys: boxes (xywh), scores, labels
+            targets: a list, each is a dict corresponds to 1 image. Keys: boxes (xywh), labels
         """
-        assert len(preds) == len(targets)
-        self.preds.extend(preds)
+        assert len(predictions) == len(targets)
+        self.predictions.extend(predictions)
         self.targets.extend(targets)
 
-    def reset(self):
-        self.preds = []
-        self.targets = []
+    def reset(self) -> None:
+        self.predictions: List[_PredictedDetection] = []
+        self.targets: List[_GroundTruthDetection] = []
+        self._results = None
 
-    def get_metrics(self):
-        preds = gather_and_merge(self.preds)
-        targets = gather_and_merge(self.targets)
+    def compute(self) -> CocoMetrics:
+        if self._results is not None:
+            return self._results
 
-        image_ids = list(range(len(targets)))          # ensure preds and targets use the same image_ids
-        coco_pred = CocoEvaluator.create_coco(preds, image_ids, self.num_classes, prediction=True)
-        coco_target = CocoEvaluator.create_coco(targets, image_ids, self.num_classes, prediction=False)
+        predictions = gather_and_merge_list(self.predictions)
+        targets = gather_and_merge_list(self.targets)
+
+        image_ids = list(
+            range(len(targets))
+        )  # ensure preds and targets use the same image_ids
+        coco_predictions = _create_coco(predictions, image_ids)
+        coco_targets = _create_coco(targets, image_ids)
 
         with contextlib.redirect_stdout(None):
-            coco_eval = COCOeval(coco_target, coco_pred, "bbox")
+            coco_eval = COCOeval(coco_targets, coco_predictions, "bbox")
             coco_eval.evaluate()
             coco_eval.accumulate()
             coco_eval.summarize()
 
-        metrics = {metric: coco_eval.stats[i] for i, metric in enumerate(self.metric_names)}
-        return metrics
+        results = CocoMetrics(*coco_eval.stats)
+        self._results = results
+        return results
 
-    @staticmethod
-    def create_coco(detections: List[Dict[str, np.ndarray]], image_ids: List[int], num_classes: int, prediction=False):
-        annotations = []
-        ann_id = 1
 
-        for img_id, det in zip(image_ids, detections):
-            det = {k: v.tolist() for k, v in det.items()}
-            for i, (box, label) in enumerate(zip(det["boxes"], det["labels"])):
-                ann = {
-                    "id": ann_id,
-                    "image_id": img_id,
-                    "category_id": label,
-                    "bbox": box,
-                    "area": box[2] * box[3],
-                    "iscrowd": 0
-                }
-                if prediction:
-                    ann["score"] = det["scores"][i]
-                
-                annotations.append(ann)
-                ann_id += 1
+def _create_coco(
+    detections: List[Union[_PredictedDetection, _GroundTruthDetection]],
+    image_ids: Optional[List[int]] = None,
+) -> COCO:
+    if image_ids is None:
+        image_ids = list(range(len(detections)))
+    annotations = []
+    ann_id = 1
+    num_classes = 0
 
-        # mimic COCO.__init__() behavior
-        with contextlib.redirect_stdout(None):
-            coco = COCO()
-            coco.dataset = {
-                "images": [{"id": img_id} for img_id in image_ids],
-                "annotations": annotations,
-                "categories": [{"id": i, "name": i} for i in range(num_classes)]
+    for img_id, det in zip(image_ids, detections):
+        boxes, labels, scores = det["boxes"], det["labels"], det.get("scores", None)
+        assert boxes.ndim == 2
+        assert boxes.shape[1] == 4
+        assert labels.ndim == 1
+        assert labels.shape[0] == boxes.shape[0]
+        if scores is not None:
+            assert scores.ndim == 1
+            assert scores.shape[0] == labels.shape[0]
+
+        for i, (box, label) in enumerate(zip(boxes, labels)):
+            ann = {
+                "id": ann_id,
+                "image_id": img_id,
+                "category_id": label,
+                "bbox": box,
+                "area": box[2] * box[3],
+                "iscrowd": 0,
             }
-            coco.createIndex()
+            if scores is not None:
+                ann["score"] = scores[i]
 
-        return coco
+            annotations.append(ann)
+            ann_id += 1
+            num_classes = max(num_classes, label + 1)
+
+    # mimic COCO.__init__() behavior
+    with contextlib.redirect_stdout(None):
+        coco = COCO()
+        coco.dataset = {
+            "images": [{"id": img_id} for img_id in image_ids],
+            "annotations": annotations,
+            "categories": [{"id": i, "name": i} for i in range(num_classes)],
+        }
+        coco.createIndex()
+
+    return coco
