@@ -1,0 +1,5 @@
+heatmap:
+  _target_: centernet_lightning.models.losses.heatmap_loss.CornerNetFocalLoss
+
+box_2d:
+  _target_: centernet_lightning.models.losses.box_loss.GIoULoss

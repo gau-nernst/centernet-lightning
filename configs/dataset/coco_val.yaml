@@ -1,0 +1,27 @@
+img_size: 512
+img_dir:
+ann_json:
+
+transforms:
+  _target_: albumentations.Compose
+  transforms:
+    - _target_: albumentations.SmallestMaxSize
+      max_size: '${data.img_size}'
+
+    - _target_: albumentations.PadIfNeeded
+      min_height: null
+      min_width: null
+      pad_height_divisor: 32
+      pad_width_divisor: 32
+
+    - _target_: albumentations.Normalize
+      mean: [0,0,0]
+      std: [1,1,1]
+
+    - _target_: albumentations.pytorch.ToTensorV2
+    
+  bbox_params:
+    _target_: albumentations.BboxParams
+    format: coco
+    label_fields: [labels]
+    min_area: 1

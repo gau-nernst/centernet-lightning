@@ -1,0 +1,3 @@
+_target_: centernet_lightning.models.basics.CosineWithWarmup
+warmup_epochs: 5
+warmup_decay: 0.01

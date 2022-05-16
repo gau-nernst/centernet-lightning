@@ -3,6 +3,7 @@ __pycache__/
 scratchpad.ipynb
 lightning_logs/
 wandb/
+outputs/
 .env
 .idea
 *results.json

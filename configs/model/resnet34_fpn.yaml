@@ -1,0 +1,18 @@
+num_classes: 80
+num_feature_maps: 4
+
+backbone:
+  _target_: vision_toolbox.backbones.resnet34
+  pretrained: true
+
+neck:
+  _target_: vision_toolbox.necks.FPN
+  
+heads:
+  heatmap:
+    _target_: centernet_lightning.models.basics.BasicHead
+    filters_list: [256, 256, '${model.num_classes}']
+
+  box_2d:
+    _target_: centernet_lightning.models.basics.BasicHead
+    filters_list: [256, 256, 4]

@@ -1,6 +1,7 @@
 import os
 import contextlib
 import io
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -9,11 +10,16 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from pycocotools.coco import COCO
 from PIL import Image
+import logging
 
 from . import transforms
 
-_transforms = {**A.__dict__, **transforms.__dict__}
-
+# _transforms = {
+#     **A.__dict__,
+#     **transforms.__dict__,
+#     'ToTensorV2': ToTensorV2
+# }
+LOGGER = logging.getLogger(__name__)
 
 def _clip_box(xywh_box, img_w, img_h):
     max_x = img_w - 1
@@ -24,7 +30,6 @@ def _clip_box(xywh_box, img_w, img_h):
     y1, y2 = max(0, y1), min(max_y, y2)
     return (x1, y1, x2-x1, y2-y1)
 
-
 class CocoDetection(Dataset):
     def __init__(self, img_dir, ann_json, transforms: A.Compose=None):
         # https://github.com/facebookresearch/detectron2/blob/main/detectron2/data/datasets/coco.py
@@ -34,7 +39,7 @@ class CocoDetection(Dataset):
             assert box_params.format == "coco"
             assert "labels" in box_params.label_fields
         
-        with contextlib.redirect_stdout(io.StringIO()):     # redict pycocotools print()
+        with contextlib.redirect_stdout():     # redict pycocotools print()
             coco = COCO(ann_json)
         cat_ids = sorted(coco.getCatIds())
         label_map = {v: i for i, v in enumerate(cat_ids)}
@@ -59,12 +64,18 @@ class CocoDetection(Dataset):
             
             # remove empty boxes
             boxes, labels = [], []
+            num_removed = 0
             for box, label in zip(target["boxes"], target["labels"]):
                 if min(box[2:]) > 1:
                     boxes.append(box)
-                    labels.append(label)            
+                    labels.append(label)
+                else:
+                    num_removed += 1
             target["boxes"] = boxes
             target["labels"] = labels
+    
+            if num_removed > 0:
+                LOGGER.warning(f"{target['image_id']}: Removed {num_removed} empty boxes")
 
         self.img_dir = img_dir
         self.img_names = img_names
@@ -100,14 +111,15 @@ def coco_detection_collate_fn(batch):
     return images, targets
 
 
-def parse_albumentations_transforms(transforms, box_params=None):
-    ts = []
-    for t in transforms:
-        t_fn = _transforms[t['name']]
-        init_args = t['init_args'] if 'init_args' in t else {}
-        ts.append(t_fn(**init_args))
-    ts.append(ToTensorV2())
+
+# def parse_albumentations_transforms(transforms, box_params=None):
+#     ts = []
+#     for t in transforms:
+#         t_fn = _transforms[t['name']]
+#         init_args = t['init_args'] if 'init_args' in t else {}
+#         ts.append(t_fn(**init_args))
+#     ts.append(ToTensorV2())
     
-    if box_params is None:
-        box_params = {'format': 'coco', 'label_fields': ['labels'], 'min_area': 1}
-    return A.Compose(ts, bbox_params=box_params)
+#     if box_params is None:
+#         box_params = {'format': 'coco', 'label_fields': ['labels'], 'min_area': 1}
+#     return A.Compose(ts, bbox_params=box_params)

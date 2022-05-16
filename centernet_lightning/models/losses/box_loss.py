@@ -9,6 +9,7 @@ __all__ = [
     "L1Loss", "SmoothL1Loss", "IoULoss", "GIoULoss", "DIoULoss", "CIoULoss"
 ]
 
+
 def _get_iou(boxes1: torch.Tensor, boxes2: torch.Tensor):
     area1 = (boxes1[...,2] - boxes1[...,0]) * (boxes1[...,3] - boxes1[...,1])
     area2 = (boxes2[...,2] - boxes2[...,0]) * (boxes2[...,3] - boxes2[...,1])
@@ -23,6 +24,7 @@ def _get_iou(boxes1: torch.Tensor, boxes2: torch.Tensor):
 
     return intersection, union
 
+
 def _get_enclosing_box(boxes1: torch.Tensor, boxes2: torch.Tensor):
     x1_close = torch.minimum(boxes1[...,0], boxes2[...,0])
     y1_close = torch.minimum(boxes1[...,1], boxes2[...,1])
@@ -31,8 +33,9 @@ def _get_enclosing_box(boxes1: torch.Tensor, boxes2: torch.Tensor):
 
     return x1_close, y1_close, x2_close, y2_close
 
+
 class IoULoss(nn.Module):
-    def __init__(self, reduction="none", keepdim=True):
+    def __init__(self, reduction="mean", keepdim=True):
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.reduction = reduction
@@ -53,10 +56,11 @@ class IoULoss(nn.Module):
             return loss.unsqueeze(-1)
         return loss
 
+
 class GIoULoss(nn.Module):
     """Generalized IoU Loss. Paper: https://arxiv.org/abs/1902.09630
     """
-    def __init__(self, reduction="none", keepdim=True):
+    def __init__(self, reduction="mean", keepdim=True):
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.reduction = reduction
@@ -79,10 +83,11 @@ class GIoULoss(nn.Module):
             return loss.unsqueeze(-1)
         return loss
 
+
 class DIoULoss(nn.Module):
     """Distance IoU Loss. Paper: https://arxiv.org/abs/1911.08287
     """
-    def __init__(self, reduction="none", keepdim=True):
+    def __init__(self, reduction="mean", keepdim=True):
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.reduction = reduction
@@ -113,7 +118,7 @@ class DIoULoss(nn.Module):
 class CIoULoss(nn.Module):
     """Complete IoU Loss. Paper: https://arxiv.org/abs/1911.08287
     """
-    def __init__(self, reduction="none", keepdim=True):
+    def __init__(self, reduction="mean", keepdim=True):
         super().__init__()
         assert reduction in ("none", "sum", "mean")
         self.reduction = reduction

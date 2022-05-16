@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from pytorch_metric_learning import  miners, distances, reducers, losses
 
+
 class ReIDCrossEntropyLoss(nn.Module):
     def __init__(self, reid_dim, num_classes):
         super().__init__()

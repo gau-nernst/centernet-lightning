@@ -1,0 +1,33 @@
+defaults:
+  - model: resnet34_fpn
+  - optimizer: adamw
+  - 
+
+  - datasets@data_train: coco_train
+  - datasets@data_val: coco_val
+
+
+
+# loss:
+
+# optimizer:
+
+trainer:
+  gpus: 2
+  strategy: ddp_find_unused_parameters_false
+  precision: 16
+  benchmark: true
+  sync_batchnorm: true
+  max_epochs: 100
+
+#   logger:
+#     _target_: pytorch_lightning.loggers.WandbLogger
+#     project: centernet
+#     log_model: true
+
+#   callbacks:
+#     - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+#     - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+#       monitor: val/mAP
+#       mode: max
+#       save_last: true
