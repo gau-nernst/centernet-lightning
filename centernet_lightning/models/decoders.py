@@ -6,6 +6,7 @@ import itertools
 import torch
 from torch import nn
 import torch.nn.functional as F
+
 # from torch.utils.data import DataLoader, ConcatDataset
 # from torchvision.ops import box_convert, batched_nms
 # import albumentations as A
@@ -32,14 +33,14 @@ import torch.nn.functional as F
 #         box_loss_weight: float=0.1,
 #         box_log: bool=False,
 #         box_multiplier: float=1.,
-        
+
 #         # heatmap params
 #         heatmap_prior: float=0.01,
 #         heatmap_loss: str='CornerNetFocalLoss',
 #         heatmap_loss_weight: float=1.,
 #         heatmap_target: str='cornernet',
 #         heatmap_target_params: Dict[str, float]=None,
-        
+
 #         # inference config
 #         nms_kernel: int=3,
 #         num_detections: int=100,
@@ -55,7 +56,7 @@ import torch.nn.functional as F
 #             'box_2d': {'out_channels': 4, 'init_bias': box_init_bias}
 #         }
 #         if optimizer_config is None:
-#             optimizer_config = {} 
+#             optimizer_config = {}
 #         super().__init__(
 #             backbone, pretrained_backbone, neck, heads,
 #             neck_config=neck_config, head_config=head_config, **optimizer_config
@@ -69,11 +70,11 @@ import torch.nn.functional as F
 #         self.box_loss = box_losses.__dict__[box_loss](reduction='sum')
 #         if heatmap_target_params is None:
 #             heatmap_target_params = {}
-        
+
 #     def compute_loss(self, outputs, targets, stride=None):
 #         if stride is None:
 #             stride = self.stride
-        
+
 #         heatmap = outputs['heatmap']
 #         box_offsets = outputs['box_2d']
 #         out_h, out_w = heatmap.shape[-2:]
@@ -125,11 +126,11 @@ import torch.nn.functional as F
 #             images = images.to(memory_format=torch.channels_last)
 #         outputs = self.model(images)
 #         preds = CenterNet.decode_detections(outputs['heatmap'].sigmoid(), outputs['box_2d'])
-        
+
 #         preds['boxes'] = box_convert(preds['boxes'], 'xyxy', 'xywh')                    # coco box format
 #         preds = {k: v.cpu().numpy() for k, v in preds.items()}                          # convert to numpy
 #         preds = [{k: v[i] for k, v in preds.items()} for i in range(images.shape[0])]   # convert to list of images
-        
+
 #         # outputs = self.model.multilevel_forward(images)
 #         # preds = {k: [] for k in ('boxes', 'scores', 'labels')}
 #         # for out in outputs:
@@ -146,7 +147,7 @@ import torch.nn.functional as F
 #         self.evaluator.reset()
 #         for k, v in metrics.items():
 #             self.log(f'val/{k}', v)
- 
+
 #     def get_dataloader(self, train=True):
 #         config = self.hparams.train_data if train else self.hparams.val_data
 #         transforms = A.load(config['transforms'], data_format='yaml')
@@ -158,24 +159,33 @@ import torch.nn.functional as F
 
 
 class CenterNetDecoder:
-    def __init__(self, box_log: bool = False, box_multiplier: float = 16.):
+    def __init__(self, box_log: bool = False, box_multiplier: float = 16.0):
         self.box_log = box_log
         self.box_multiplier = box_multiplier
 
     @staticmethod
-    def get_topk_from_heatmap(heatmap: torch.Tensor, pseudo_nms: bool=True, nms_kernel: int=3, k: int=100):
-        '''Gather top k detections from heatmap. Batch dim is optional. 
-        
+    def get_topk_from_heatmap(
+        heatmap: torch.Tensor,
+        pseudo_nms: bool = True,
+        nms_kernel: int = 3,
+        k: int = 100,
+    ):
+        """Gather top k detections from heatmap. Batch dim is optional.
+
         Returns: scores, indices, labels with dim (N, k)
-        '''
+        """
         batch_size = heatmap.shape[0]
 
         # 1. pseudo-nms via max pool
         if pseudo_nms:
             padding = (nms_kernel - 1) // 2
-            nms_mask = F.max_pool2d(heatmap, kernel_size=nms_kernel, stride=1, padding=padding) == heatmap
+            pooled_heatmap = F.max_pool2d(
+                heatmap, kernel_size=nms_kernel, stride=1, padding=padding
+            )
+            nms_mask = pooled_heatmap == heatmap
             heatmap = heatmap * nms_mask
-        heatmap, labels = torch.max(heatmap, dim=1)         # get best candidate at each heatmap location, since box regression is shared
+        # get best candidate at each heatmap location, since box regression is shared
+        heatmap, labels = torch.max(heatmap, dim=1)
 
         # 3. flatten and get topk
         heatmap = heatmap.view(batch_size, -1)
@@ -189,9 +199,9 @@ class CenterNetDecoder:
         box_offsets: torch.Tensor,
         indices: torch.Tensor,
         normalize_boxes: bool = False,
-        stride: int = 4
+        stride: int = 4,
     ) -> torch.Tensor:
-        '''Gather 2D bounding boxes at given indices.
+        """Gather 2D bounding boxes at given indices.
 
         Args:
             box_offsets: (N, 4, H, W)
@@ -199,10 +209,10 @@ class CenterNetDecoder:
 
         Returns:
             boxes: (N, num_dets, 4)
-        '''
+        """
         out_h, out_w = box_offsets.shape[-2:]
         cx = torch.remainder(indices, out_w) + 0.5
-        cy = torch.div(indices, out_w, rounding_mode='floor') + 0.5
+        cy = torch.div(indices, out_w, rounding_mode="floor") + 0.5
 
         # decoded = multiplier x exp(encoded)
         box_offsets = box_offsets.flatten(start_dim=-2)
@@ -216,17 +226,25 @@ class CenterNetDecoder:
         # boxes[...,:2] -= torch.gather(box_offsets[...,:2,:], dim=-1, index=indices)
         # boxes[...,2:] += torch.gather(box_offsets[...,2:,:], dim=-1, index=indices)
 
-        x1 = cx - torch.gather(box_offsets[...,0,:], dim=-1, index=indices)       # x1 = cx - left
-        y1 = cy - torch.gather(box_offsets[...,1,:], dim=-1, index=indices)       # y1 = cy - top
-        x2 = cx + torch.gather(box_offsets[...,2,:], dim=-1, index=indices)       # x2 = cx + right
-        y2 = cy + torch.gather(box_offsets[...,3,:], dim=-1, index=indices)       # y2 = cy + bottom
+        x1 = cx - torch.gather(
+            box_offsets[..., 0, :], dim=-1, index=indices
+        )  # x1 = cx - left
+        y1 = cy - torch.gather(
+            box_offsets[..., 1, :], dim=-1, index=indices
+        )  # y1 = cy - top
+        x2 = cx + torch.gather(
+            box_offsets[..., 2, :], dim=-1, index=indices
+        )  # x2 = cx + right
+        y2 = cy + torch.gather(
+            box_offsets[..., 3, :], dim=-1, index=indices
+        )  # y2 = cy + bottom
         boxes = torch.stack((x1, y1, x2, y2), dim=-1)
 
-        if normalize_boxes:     # convert to normalized coordinates
-            boxes[...,[0,2]] /= out_w
-            boxes[...,[1,3]] /= out_h
+        if normalize_boxes:  # convert to normalized coordinates
+            boxes[..., [0, 2]] /= out_w
+            boxes[..., [1, 3]] /= out_h
         else:
-            boxes *= stride     # convert to input coordinates
+            boxes *= stride  # convert to input coordinates
         return boxes
 
     def decode_detections(
@@ -234,19 +252,14 @@ class CenterNetDecoder:
         heatmap: torch.Tensor,
         box_offsets: torch.Tensor,
         topk_kwargs: Dict[str, Any] = None,
-        box_kwargs: Dict[str, Any] = None
+        box_kwargs: Dict[str, Any] = None,
     ) -> Dict[str, torch.Tensor]:
-        '''Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels
-        '''
+        """Decode model outputs to detections. Returns: a Dict with keys boxes, scores, labels"""
         if topk_kwargs is None:
             topk_kwargs = {}
         if box_kwargs is None:
             box_kwargs = {}
-        
+
         scores, indices, labels = self.get_topk_from_heatmap(heatmap, **topk_kwargs)
         boxes = self.gather_and_decode_boxes(box_offsets, indices, **box_kwargs)
-        return {
-            'boxes': boxes,
-            'scores': scores,
-            'labels': labels
-        }
+        return {"boxes": boxes, "scores": scores, "labels": labels}
