@@ -1,7 +1,7 @@
 import contextlib
 import logging
 import os
-from typing import Optional
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import albumentations as A
 import numpy as np
@@ -14,7 +14,19 @@ from tqdm import tqdm
 LOGGER = logging.getLogger(__name__)
 
 
-def _clip_box(xywh_box, img_w, img_h):
+_Box = Tuple[float, float, float, float]
+
+
+class _LogWriter:
+    def write(self, msg: str) -> None:
+        for line in msg.rstrip().splitlines():
+            LOGGER.info(line.rstrip())
+
+    def flush(self) -> None:
+        pass
+
+
+def _clip_box(xywh_box: Iterable[float], img_w: int, img_h: int) -> _Box:
     max_x = img_w - 1
     max_y = img_h - 1
     x1, y1, w, h = xywh_box
@@ -38,7 +50,8 @@ class CocoDetectionDataset(Dataset):
             assert box_params.format == "coco"
             assert "labels" in box_params.label_fields
 
-        with contextlib.redirect_stdout(None):  # redict pycocotools print()
+        LOGGER.info(f"Reading COCO annotation {ann_json}")
+        with contextlib.redirect_stdout(_LogWriter()):  # redict pycocotools print()
             coco = COCO(ann_json)
 
         cat_ids = sorted(coco.getCatIds())
@@ -48,28 +61,19 @@ class CocoDetectionDataset(Dataset):
         img_ids = sorted(coco.getImgIds())
 
         data = []
+        num_removed = 0
         for img_id in tqdm(img_ids, desc="Preprocess detections"):
             img_info = coco.imgs[img_id]  # keys: bbox, category_id, id
             img_anns = coco.imgToAnns[img_id]  # keys: filename, height, width, id
 
             boxes, labels = [], []
-            num_removed = 0
-
-            # each ann has
             for ann in img_anns:
                 box = _clip_box(ann["bbox"], img_info["width"], img_info["height"])
-
-                # remove degenerate boxes
-                if max(box[2:]) < 1:
+                if min(box[2:]) < 1:  # remove degenerate boxes
                     num_removed += 1
                     continue
-
                 boxes.append(box)
                 labels.append(label_to_id[ann["category_id"]])
-
-            if num_removed > 0:
-                msg = f"Removed {num_removed} empty boxes from image id {img_id}"
-                LOGGER.warning(msg)
 
             img_data = {
                 "filename": img_info["file_name"],
@@ -81,6 +85,9 @@ class CocoDetectionDataset(Dataset):
             }
             data.append(img_data)
 
+        if num_removed > 0:
+            LOGGER.warning(f"Removed {num_removed} empty box(es)")
+
         self.img_dir = img_dir
         self.data = data
         self.transforms = transforms
@@ -88,7 +95,9 @@ class CocoDetectionDataset(Dataset):
         self.label_to_id = label_to_id
         self.id_to_label = id_to_label
 
-    def __getitem__(self, idx: int):
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[Union[np.ndarray, torch.Tensor], Dict[str, np.ndarray]]:
         img_data = self.data[idx]
         img_path = os.path.join(self.img_dir, img_data["filename"])
         img = np.array(Image.open(img_path).convert("RGB"))
@@ -97,13 +106,13 @@ class CocoDetectionDataset(Dataset):
         if self.transforms is not None:
             augmented = self.transforms(image=img, bboxes=boxes, labels=labels)
             img = augmented["image"]
-            boxes = augmented["bboxes"]
-            labels = augmented["labels"]
+            boxes = np.array(augmented["bboxes"])
+            labels = np.array(augmented["labels"])
 
         target = {"bboxes": boxes, "labels": labels}
         return img, target
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
 
